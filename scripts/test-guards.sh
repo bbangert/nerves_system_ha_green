@@ -246,6 +246,23 @@ chmod +x "$T"/samefwup
 expect_traced "no write syscall below 8 MiB (fwup)" "install.a rewrites LBA 100 with its own bytes" "traced task install.a: write of bytes 51200..51711" \
     env FWUP="$T"/samefwup "$S"/check-loader-area.sh "$T"/good.fw
 
+# The trace parser itself, on synthetic strace lines plus real strace output
+# for the calls fwup and the kernel tools never issue (mmap, copy_file_range,
+# splice onto the target).
+python3 -I "$S"/guards/test_write_trace.py >"$T"/wt.out 2>&1 || true
+while IFS=$(printf '\t') read -r st name detail; do
+    case $st in
+        ok) row "write-trace parser sees every write to the target" "$name" "passes" ;;
+        SKIP)
+            row "write-trace parser sees every write to the target" "$name" "SKIPPED: $detail"
+            SKIPS=$((SKIPS + 1)) ;;
+        *)
+            row "write-trace parser sees every write to the target" "$name" "FAILED: $st $detail"
+            FAILS=$((FAILS + 1)) ;;
+    esac
+done <"$T"/wt.out
+[ -s "$T"/wt.out ] || { row "write-trace parser sees every write to the target" "test_write_trace.py" "FAILED: no output"; FAILS=$((FAILS + 1)); }
+
 python3 -I - "$IMG/u-boot.itb" <<'PY'
 import sys
 open(sys.argv[1], "wb").write(b"\xa5" * (1 << 20))
@@ -476,7 +493,7 @@ if [ "$FAILS" -ne 0 ]; then
     exit 1
 fi
 if [ "$SKIPS" -ne 0 ]; then
-    echo "test-guards: all $total checks behaved; $SKIPS SKIPPED (no strace): the write-syscall trace was not tested" >&2
+    echo "test-guards: all $total checks behaved; $SKIPS SKIPPED (no strace or a syscall unavailable here): the write-syscall trace was not fully tested" >&2
 else
     echo "test-guards: all $total checks behaved"
 fi

@@ -28,6 +28,10 @@ CALL = re.compile(r"^([a-z0-9_]+)\((.*)$")
 RESUMED = re.compile(r"^<\.\.\. ([a-z0-9_]+) resumed>(.*)$")
 RET = re.compile(r"\)\s+=\s+(-?\d+|0x[0-9a-f]+)")
 FD = re.compile(r"^(\d+)<(.*?)>")
+# mmap(addr, len, prot, flags, fd<path>, off)
+MMAP = re.compile(r"^[^,]*,[^,]*,\s*([^,]*),\s*([^,]*),\s*-?\d+(?:<(.*?)>)?\s*,")
+# copy_file_range/splice(fd_in, off_in, fd_out<path>, off_out, len, flags)
+COPY_DST = re.compile(r"^\d+(?:<.*?>)?\s*,\s*[^,]+,\s*\d+<(.*?)>\s*,")
 
 
 def have_strace():
@@ -46,6 +50,11 @@ class Tracker:
         self.tables = {}   # pid -> {fd: Desc}; threads share one table
         self.pending = {}  # pid -> (call, args)
         self.writes = []   # (start, end_exclusive, what)
+        # Once the target is mapped shared without PROT_WRITE, any later
+        # writable mprotect might be upgrading that mapping; mprotect has no
+        # descriptor to tell, and ld.so calls it constantly, so it is ignored
+        # until such a mapping exists.
+        self.ro_shared = False
 
     def table(self, pid):
         return self.tables.setdefault(pid, {})
@@ -79,6 +88,14 @@ class Tracker:
                 self.pending[pid] = (call, body)
             return
         self.handle(pid, call, args)
+
+    def finish(self):
+        # The resumed line of a call that killed its process never comes; its
+        # outcome is unknown, so a call that names the target counts as a write.
+        for call, args in self.pending.values():
+            if self.target in args:
+                self.hit(*WHOLE, "%s unfinished" % call)
+        self.pending.clear()
 
     def ret(self, args):
         m = RET.search(args)
@@ -125,6 +142,44 @@ class Tracker:
             tab.pop(fd, None)
             return
 
+        # Their writes never show up as write syscalls, and a submission
+        # carries no descriptor name to attribute it by.
+        if call in ("io_uring_setup", "io_uring_enter", "io_setup", "io_submit"):
+            if rv is None or rv >= 0:
+                self.hit(*WHOLE, "%s: asynchronous I/O cannot be attributed" % call)
+            return
+
+        if call == "mprotect":
+            if self.ro_shared and "PROT_WRITE" in args and (rv is None or rv >= 0):
+                self.hit(*WHOLE, "mprotect PROT_WRITE after a read-only shared mmap")
+            return
+
+        # The descriptor that gets written is not the first argument here, so
+        # these cannot go through the generic path below. A failed call wrote
+        # nothing; an unknown result (rv None) is treated as a success.
+        if call in ("mmap", "copy_file_range", "splice"):
+            if rv is not None and rv < 0:
+                return
+            if call == "mmap":
+                m = MMAP.match(args)
+                if m:
+                    if m.group(3) == self.target and "MAP_SHARED" in m.group(2):
+                        if "PROT_WRITE" in m.group(1):
+                            self.hit(*WHOLE, "shared writable mmap")
+                        else:
+                            self.ro_shared = True
+                    return
+            else:
+                m = COPY_DST.match(args)
+                if m:
+                    if m.group(1) == self.target:
+                        self.hit(*WHOLE, call)
+                    return
+            if self.target in args:
+                self.hit(*WHOLE, "%s not parsed" % call)
+                self.ro_shared = True
+            return
+
         fd, path = self.fdarg(args)
         if fd is None:
             if call in ("truncate",) and self.target in args:
@@ -138,11 +193,6 @@ class Tracker:
         if call == "lseek":
             if rv is not None and rv >= 0:
                 desc.pos = rv
-            return
-
-        if call == "mmap" and path == self.target:
-            if "PROT_WRITE" in args and "MAP_SHARED" in args:
-                self.hit(*WHOLE, "shared writable mmap")
             return
 
         if path != self.target:
@@ -167,19 +217,21 @@ class Tracker:
             return
 
         if call in ("writev", "pwritev", "pwritev2"):
-            n = sum(int(x) for x in re.findall(r"iov_len=(\d+)", rest))
+            # -s 0 elides the iovec, so the length is what the call returned.
+            if rv is not None and rv < 0:
+                return
             tail = re.search(r"\],\s*\d+(?:,\s*(\d+))?", rest)
-            if not tail or (call != "writev") != (tail.group(1) is not None):
+            if rv is None or not tail or (call != "writev") != (tail.group(1) is not None):
                 self.hit(*WHOLE, "%s not parsed" % call)
                 desc.pos = None
             elif call != "writev":
                 off = int(tail.group(1))
-                self.hit(off, off + n, call)
+                self.hit(off, off + rv, call)
             elif desc.pos is None:
                 self.hit(*WHOLE, "writev at an unknown offset")
             else:
-                self.hit(desc.pos, desc.pos + n, call)
-                desc.pos += n
+                self.hit(desc.pos, desc.pos + rv, call)
+                desc.pos += rv
             return
 
         if call == "ioctl":
@@ -187,10 +239,11 @@ class Tracker:
                 self.hit(*WHOLE, "ioctl " + rest.split(",")[1].strip())
             return
 
-        if call in ("ftruncate", "fallocate", "copy_file_range", "sendfile",
-                    "sendfile64", "splice"):
-            # Rare enough on a disk being installed that parsing direction
-            # and offsets is not worth it.
+        # sendfile's destination is its first argument; the 64-bit ABIs only
+        # have the name sendfile.
+        if call in ("ftruncate", "fallocate", "sendfile"):
+            # Rare enough on a disk being installed that parsing offsets is
+            # not worth it.
             self.hit(*WHOLE, call)
 
 
@@ -202,12 +255,14 @@ def run(target, cmd, env=None, capture=True):
         argv = ["strace", "-f", "-qq", "-y", "-s", "0", "--seccomp-bpf", "-o", log,
                 "-e", "trace=open,openat,openat2,creat,close,dup,dup2,dup3,fcntl,lseek,"
                 "write,pwrite64,writev,pwritev,pwritev2,ftruncate,truncate,fallocate,"
-                "copy_file_range,sendfile,splice,ioctl,mmap,clone,clone3,fork,vfork"]
+                "copy_file_range,sendfile,splice,ioctl,mmap,mprotect,io_uring_setup,io_uring_enter,"
+                "io_setup,io_submit,clone,clone3,fork,vfork"]
         r = subprocess.run(argv + ["--"] + cmd, env=env, capture_output=capture, text=True)
         t = Tracker(target)
         with open(log, errors="replace") as f:
             for line in f:
                 t.feed(line.rstrip("\n"))
+        t.finish()
         return r, t.writes
 
 
