@@ -8,7 +8,11 @@ fragment and the environment, never in C.
 - Source: https://github.com/home-assistant/operating-system, tag `18.4`,
   commit `4a7dab478abc8f959c0fc2c24876d08282a3c060`
 - Path: `buildroot-external/board/nabucasa/green/patches/uboot/`
-- License: GPL-2.0 (U-Boot's)
+- License: GPL-2.0-or-later (U-Boot's own license; these are patches to U-Boot
+  carried by Home Assistant OS). The files they add say so in their SPDX
+  headers, with two exceptions: `board/nabucasa/ha-green/ha-green.c` is
+  `GPL-2.0` (only), and `arch/arm/dts/rk3566-ha-green.dts` is
+  `(GPL-2.0+ OR MIT)`.
 
 | sha256 | file |
 | --- | --- |

@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # uploads Release assets
+  contents: read
 
 env:
   # The host OTP must match the one nerves_system_br builds for the target,
@@ -96,6 +96,8 @@ jobs:
   build:
     # Full Buildroot builds are slow, so only on tags or a manual run.
     needs: check
+    permissions:
+      contents: write # uploads Release assets
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:

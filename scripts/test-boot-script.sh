@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
     --env) env_file=$2; shift 2 ;;
     --work) work=$2; shift 2 ;;
     -j) jobs=$2; shift 2 ;;
-    -h | --help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h | --help) awk 'NR > 1 { if (!/^#/) exit; print }' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
     esac
 done

@@ -2,8 +2,8 @@
 
 Boot chain:
 
-1. BootROM → the board's stock first stage: an SPL in the SPI NOR (2023.07.02 on the unit examined) or the one in eMMC LBA 64–16383. Which runs first is inferred, not proven; neither is ever written by us.
-2. The SPL loads our `u-boot.itb` from raw LBA 16384 of the SD card if it carries FDT magic there, else of the eMMC.
+1. BootROM → the board's stock first stage. Read out of one unit running stock Home Assistant OS 18.4 (not boot-tested with this system): the SPI NOR holds `U-Boot SPL 2023.07.02`, the eMMC (LBA 64–16383) `U-Boot SPL 2026.04`, and both SPLs' device trees carry the boot order SD card → eMMC → SPI NOR (`u-boot,spl-boot-order`). Which of the two the BootROM runs is inferred (no `u-boot,spl-boot-device` in `/chosen`, which a 2026.04 SPL would set), not proven; neither is ever written by us.
+2. Either SPL is designed to load our `u-boot.itb` from raw LBA 16384 of the SD card if it carries FDT magic there, else of the eMMC.
 3. Our U-Boot runs the boot script below and boots `Image.<slot>` with `booti`.
 
 U-Boot proper is v2026.04 plus Home Assistant OS's Green patches

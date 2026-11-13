@@ -4,8 +4,8 @@
 # timestamps and the board DTB's contents are not part of it.
 #
 # Derived from the Green FIT in Home Assistant OS 18.4 (U-Boot 2026.04). The
-# SPL generations in the field (2023.07.02 up to 2026.04) all accept this
-# shape. Regenerate for review with:
+# SPL generations in the field (2023.07.02 up to 2026.04) are expected to
+# accept this shape. Regenerate for review with:
 #   scripts/check-fit.sh --print-contract <u-boot.itb>
 default config-1
 config config-1 firmware=atf-1 loadables=u-boot,atf-2,atf-3,atf-4,atf-5,atf-6 fdt=fdt-1

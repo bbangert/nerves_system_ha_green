@@ -1,9 +1,10 @@
 # Merged onto the HAOS-patched green_defconfig. The first block is Home
 # Assistant OS's own fragments for the Green (common uboot.config + board
-# uboot.config, minus CMD_FILEENV, which needs a HAOS-only C patch), so the
-# resolved config starts as the one HAOS ships to every Green. The default
-# environment file comes from BR2_TARGET_UBOOT_DEFAULT_ENV_FILE in
-# nerves_defconfig, which also sets ENV_USE_DEFAULT_ENV_TEXT_FILE.
+# uboot.config, minus CMD_FILEENV, which needs a C patch we do not carry, and
+# the cosmetic SYS_PROMPT), so the resolved config starts as the one HAOS
+# ships to every Green. The default environment file comes from
+# BR2_TARGET_UBOOT_DEFAULT_ENV_FILE in nerves_defconfig, which also sets
+# ENV_USE_DEFAULT_ENV_TEXT_FILE.
 # CONFIG_LOCALVERSION_AUTO is not set
 CONFIG_DISTRO_DEFAULTS=y
 # CONFIG_EXPERT is not set

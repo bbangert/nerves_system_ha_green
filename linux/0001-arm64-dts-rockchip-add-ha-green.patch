@@ -4,7 +4,7 @@ Date: Fri, 13 Nov 2026 05:03:50 +0000
 Subject: [PATCH] arm64: dts: rockchip: add Home Assistant Green
 
 Port of the Home Assistant Green (RK3566) board DTS to the Rockchip
-vendor 6.1 kernel. Source: home-assistant/operating-system @ 945ba38d88e7,
+vendor 6.1 kernel. Source: home-assistant/operating-system 18.4 (4a7dab478abc),
 buildroot-external/board/nabucasa/green/patches/linux/ 0001 (Seeed,
 GPL-2.0+ OR MIT) with 0003/0005/0006 folded in.
 

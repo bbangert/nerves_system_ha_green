@@ -17,18 +17,27 @@ project's workflow, so a damaged loader could not be repaired.
 
 ## Boot chain
 
-1. The RK3566 BootROM starts the board's stock first stage: a factory SPL
-   (U-Boot SPL 2023.07.02 was found in the SPI NOR of the unit examined)
-   and/or the SPL in the eMMC at LBA 64-16383. Which one runs first is
-   inferred from a missing `/chosen` property, not proven.
-2. That SPL loads `u-boot.itb` (our U-Boot and BL31, a FIT) from raw LBA
-   16384 of the SD card if the card carries FDT magic there, otherwise of the
-   eMMC. This is the stock SPL's own rule, so a prepared SD card takes over
-   the boot, and pulling it returns the unit to what the eMMC holds.
+1. The RK3566 BootROM starts the board's stock first stage, which this
+   system never writes. Read out of one unit running stock Home Assistant OS
+   18.4 (read out, not boot-tested with this system): the SPI NOR holds a
+   loader with `U-Boot SPL 2023.07.02`, the eMMC holds `U-Boot SPL 2026.04`
+   (LBA 64-16383), and the device trees of both SPLs carry the boot order SD
+   card, eMMC, SPI NOR (`u-boot,spl-boot-order`). Which of the two SPLs the
+   BootROM runs is inferred, not proven: the running system had no
+   `u-boot,spl-boot-device` in `/chosen`, which a 2026.04 SPL would set, so
+   the NOR's SPL probably ran.
+2. Either SPL is designed to load `u-boot.itb` (our U-Boot and BL31, a FIT)
+   from raw LBA 16384 of the SD card if the card carries FDT magic there,
+   otherwise of the eMMC, so a prepared SD card is designed to take over the
+   boot, and pulling it is designed to return the unit to what the eMMC
+   holds. Nothing here has been booted on hardware yet.
 3. Our U-Boot runs one boot script (its compiled-in environment,
    `uboot/uboot.env`), loads the state block, and boots `Image.<slot>` with
    the matching device tree from the boot FAT, with the root filesystem on
-   the same disk.
+   the same disk. After reading the state block the script trusts its own
+   variables only once they are shown equal to a copy taken before the
+   import; otherwise, or if the import fails part-way, it boots as if there
+   were no block: slot A on defaults, nothing saved.
 
 The boot script, the config delta against Home Assistant OS's U-Boot and the
 FIT contract are in [uboot/README.md](uboot/README.md).
@@ -44,15 +53,22 @@ Enforced, not just intended:
 
 - The kernel has Rockchip vendor storage (which writes eMMC LBA 7168-7679,
   inside the loader area), the SFC controller and the SPI-NOR driver turned
-  off, so no driver can reach either place.
+  off, and also `/dev/mem` (a path to the SFC's registers, so to the NOR) and
+  the MMC test driver (raw test patterns to whatever card it binds), so no
+  Linux driver path reaches either place. The FIQ debugger is off too.
 - U-Boot is built without the `sf` command and with no environment storage
   driver; its only raw write is the Nerves state block.
-- No fwup task writes below LBA 32768 except the GPT (LBA 0-33 and its backup
-  at the end of the disk) and the FIT window in `complete` and `install`. No
-  idblock, SPL or TPL is built into `images/`, a `.fw` or the rootfs.
+- Only tasks that can never run against the eMMC write a partition table
+  (`complete` for SD cards and image files, the SD-only `expand-data`, and
+  `emmc-gpt` into a scratch file); the eMMC's table is copied by
+  `green-install-emmc`. The FIT window is written only by `complete` and
+  `install`, and nothing else writes below LBA 32768. No idblock, SPL or TPL
+  is built into `images/`, a `.fw` or the rootfs.
 - The build runs guards from `scripts/` and fails if any of this stops being
   true: `check-loader-area.sh` (resolves every offset in the built `.fw`
-  files and applies `complete` to a pattern-filled image),
+  files, applies `complete` to a pattern-filled image, models fwup's 128 KiB
+  segments, and, when `strace` is available, fails on any write syscall below
+  8 MiB from a task that can reach the eMMC),
   `check-fit.sh` (the FIT against the stock SPL's contract),
   `check-kernel-config.sh`, `check-env-config.sh`, `check-no-guid-lookup.sh`
   and `check-no-loader-binaries.sh`. `scripts/test-guards.sh` shows that each
@@ -69,7 +85,7 @@ only the GUIDs differ.
 | 64-16383 | Stock loader, never written |
 | 16384 | `u-boot.itb`, raw; window reserved up to LBA 32767 (8 MiB) |
 | 32768 | p1 state: U-Boot environment in the first 128 KiB (1 MiB partition) |
-| 34816 | p2 boot FAT, 256 MiB: `Image.a`, `Image.b`, `rk3566-ha-green.a.dtb`, `rk3566-ha-green.b.dtb` |
+| 34816 | p2 boot FAT, 256 MiB: `Image.a`, `Image.b`, `rk3566-ha-green.a.dtb`, `rk3566-ha-green.b.dtb`, and an empty `medium.sd` or `medium.mmc` |
 | 559104 | p3 rootfs A, squashfs, 512 MiB |
 | 1607680 | p4 rootfs B, squashfs, 512 MiB |
 | 2656256 | p5 application data, ext4, grows to the end of the disk |
@@ -77,6 +93,26 @@ only the GUIDs differ.
 The root device is chosen by name in the boot script, never by GUID or label.
 U-Boot and Linux number the MMC devices alike: `mmcblk0` is the eMMC and
 `mmcblk1` the SD card.
+
+### fwup tasks
+
+| Task | Writes |
+| --- | --- |
+| `complete` | The whole layout to an SD card or an image file. `complete.refuse-emmc` refuses a destination that holds `medium.mmc`. |
+| `install` | The eMMC, all but its partition table; only through `green-install-emmc`. |
+| `emmc-gpt` | The eMMC's partition table, into the scratch file `green-install-emmc` copies from. |
+| `upgrade` | A/B OTA: p2-p4 and the state block. |
+
+Operations (`fwup-ops.conf`, installed as `/usr/share/fwup/ops.fw`):
+`expand-data` (SD card only; the eMMC's table is final at install),
+`factory-reset`, `prevent-revert`, `revert`, `status` and `validate`.
+
+`complete` leaves an empty `medium.sd` and `install` an empty `medium.mmc` in
+the boot FAT. They are how the tasks tell an SD card from an installed eMMC;
+do not delete them. fwup cannot identify the device it is aimed at, so never
+point `fwup -t complete` (or `emmc-gpt`) at `/dev/mmcblk0` by hand: on a
+stock eMMC that would rewrite LBA 0-255, with identical bytes in the loader
+part. Use only `green-install-emmc`.
 
 ## LED stage codes
 
@@ -88,7 +124,8 @@ With no console, the user LED shows how far a boot got:
 | off for 10 s, then solid again | U-Boot could not load or boot the kernel; it retries |
 | heartbeat | Our kernel is running |
 
-The activity LED shows eMMC and SD I/O. If stock Home Assistant OS comes up
+The activity LED blinks on eMMC I/O only (kernel trigger `mmc0`); SD card
+I/O does not drive it. If stock Home Assistant OS comes up
 with the prepared card inserted, the stock SPL did not take our FIT.
 
 ## Breadcrumb files
@@ -111,21 +148,60 @@ Nothing is written to the eMMC's FAT this way.
    `complete` task, for example `mix burn` or
    `fwup -a -d /dev/sdX -t complete -i product.fw`. The card then carries the
    FIT at LBA 16384 and the whole layout.
-2. Put the card in the Green and power it on. The stock first stage loads our
-   U-Boot from the card; once Erlang is up the unit answers over SSH and mDNS
-   (`nerves-<serial>`).
-3. Copy the same `.fw` to the unit and run `green-install-emmc <fw>` to put
-   the system on the eMMC. It refuses, writing nothing, unless the system runs
-   from the SD card, `/dev/mmcblk0` is a non-removable MMC device that is not
-   the boot disk and is not mounted or used as swap, an `RKNS` loader header
-   sits at eMMC LBA 64 (a blank eMMC could not boot, and we never write a
-   loader), the `.fw` is for platform `ha_green`, and the SD card carries a
-   FIT. It then runs `fwup -t install` and prints the SHA-256 of eMMC LBA
-   64-16383 before and after (they must match), the SHA-256 of the FIT window
-   on the SD card and on the eMMC (they must match), and a final `PASS` or
-   `FAIL`. After a `FAIL`, do not reboot into the eMMC; no repair is attempted.
-4. Remove the card and reboot. Without the card the stock SPL falls through to
-   the eMMC's copy of our FIT.
+2. Put the card in the Green and power it on. The system is designed to boot
+   from the card, with the hostname `nerves-` plus the last four characters
+   of the board serial (`rootfs_overlay/etc/erlinit.config`). SSH and mDNS
+   come from the product firmware, not from this system.
+3. Installing replaces Home Assistant OS on the eMMC: the partition table,
+   the system and all data. Back up first. Copy the same `.fw` to the unit
+   and run `green-install-emmc <fw>`. The `.fw` must be the build the SD card
+   was written from: the final check compares the eMMC's FIT with the SD
+   card's, so a different build ends in `FAIL` even though the install
+   completed.
+
+   The tool refuses, writing nothing, unless all of these hold: the system
+   runs from the SD card; `/dev/mmcblk0` is a non-removable MMC device with
+   512-byte blocks and at least 3704866 sectors (the layout's end plus the
+   backup table), is not the boot disk, and is not mounted or used as swap;
+   an `RKNS` loader header sits at eMMC LBA 64; the `.fw` is for platform
+   `ha_green`; and the SD card carries a FIT. A refusal reads
+   `green-install-emmc: REFUSED: <reason>; nothing was written to the eMMC.`
+
+   If there is no `RKNS` header (a blank, erased or non-stock eMMC), this
+   system cannot be installed on that unit: we never write a loader. Restore
+   it first with the official installer card (see Restore below).
+
+   Then the tool:
+
+   1. hashes eMMC LBA 64-16383 (the loader area) with direct I/O;
+   2. has fwup render the eMMC's partition table into a scratch file
+      (task `emmc-gpt`), checks that it lies in LBA 0-33 and in the backup
+      sectors at the end of the disk, and copies only those sectors to the
+      eMMC itself, backup first, then primary, and reads them back;
+   3. runs `fwup -t install`, which writes no partition table;
+   4. hashes the loader area again, compares the FIT window (LBA
+      16384-32767) with the SD card's, and re-checks the partition table.
+
+   fwup does not write the table because it writes in 128 KiB segments:
+   writing the 34 table sectors would rewrite LBA 0-255, which includes the
+   start of the stock loader, even with identical bytes.
+
+   A good run prints, among the hashes:
+
+   ```
+   eMMC GPT: written and read back identical
+   loader area: unchanged
+   FIT window: identical
+   eMMC GPT: unchanged by the install
+   PASS
+   ```
+
+   Anything else ends with
+   `FAIL: do not reboot into the eMMC; no repair was attempted`.
+   After an interruption the tool can simply be run again; the SD card stays
+   bootable throughout.
+4. Remove the card and reboot. Without the card the stock SPL is designed to
+   fall through to the eMMC's copy of our FIT.
 
 U-Boot is not part of an over-the-air upgrade: upgrades write only p2-p4 and
 the state block. A new U-Boot arrives only through `complete` or `install`.
@@ -158,9 +234,10 @@ probably lost; panics still reboot after 10 s.
 
 ## Restore to stock Home Assistant OS
 
-Boot the official Home Assistant Green installer SD card. It rewrites the
-whole eMMC, loader included, with Nabu Casa's own images. This system provides
-no `dd` path back to stock of its own.
+Restoring Home Assistant OS is done with the official Home Assistant Green
+installer card, which rewrites the whole eMMC, loader included, with Nabu
+Casa's own images; data on the eMMC is lost. This system provides no `dd`
+path back to stock of its own.
 
 ## Hardware
 
@@ -172,10 +249,10 @@ no `dd` path back to stock of its own.
 | NPU | Rockchip `rknpu` driver 0.9.8 | planned, not yet verified on hardware |
 | GPU | Mali-G52, `kbase` g29p1 | planned, not yet verified on hardware |
 | Video codecs | Rockchip MPP (`/dev/mpp_service`) | planned, not yet verified on hardware |
-| RGA 2D blitter | `/dev/rga`; scaling not supported | planned, not yet verified on hardware |
+| RGA 2D blitter | `/dev/rga`; driver enabled; not relied on: the RGA2 core addresses only the first 4 GiB of RAM, and a buffer above that fails the job | planned, not yet verified on hardware |
 | RTC | PCF8563 | planned, not yet verified on hardware |
 
-No WiFi or Bluetooth. No serial console is needed; the kernel console is on
+No onboard WiFi or Bluetooth (the vendor kernel config still includes USB Bluetooth support). No serial console is needed; the kernel console is on
 `tty0` and `ttyS2`.
 
 The kernel provides drivers and device nodes only. The userspace libraries
@@ -190,20 +267,28 @@ mix compile    # builds the system with Buildroot
 ```
 
 The guards run inside the build and need only `python3` and the build's own
-`fwup`. To run the ones that take no build output by hand:
+`fwup`. The test suites run on a host:
 
 ```sh
 scripts/check-env-config.sh
 scripts/check-no-guid-lookup.sh
-scripts/test-guards.sh     # needs fwup
+sh scripts/test-guards.sh                  # fwup, python3; strace optional, without it the write trace is skipped
+sh scripts/test-green-install-emmc.sh      # also with --break-test
+scripts/test-boot-script.sh --cache <dir>  # builds U-Boot's sandbox
 ```
 
-The header of each script under `scripts/` says what it takes as arguments.
+`test-boot-script.sh` needs gcc, make, bison, flex, python3 and fwup, plus
+either `DTC` and `PYTHON3` pointing at a dtc and a Python with libfdt, or
+swig and python3 setuptools. The header of each script under `scripts/` says
+what it takes as arguments.
 
 ## Licenses and provenance
 
 See [NOTICE](NOTICE) and `LICENSES/`. The U-Boot patches are Home Assistant
 OS's Green patches, unmodified ([uboot/patches/README.md](uboot/patches/README.md)).
+The kernel patch `linux/0001-arm64-dts-rockchip-add-ha-green.patch` adds
+`rk3566-ha-green.dts` (`GPL-2.0+ OR MIT`, Copyright Seeed Co., Ltd.), ported
+from the Green device tree in Home Assistant OS 18.4.
 The DDR and BL31 blobs are Rockchip's rkbin
 ([uboot/rkbin/README.md](uboot/rkbin/README.md)). The build scaffolding and
 fwup configuration derive from `nerves_system_rock_4d`.

@@ -468,7 +468,7 @@ expect_refusal "no RKNS stock loader"
 finish
 
 begin wrong_platform
-echo '"rock_4d"' > "$C/meta"
+echo '"some_other_board"' > "$C/meta"
 expect_refusal "not a ha_green firmware"
 finish
 
