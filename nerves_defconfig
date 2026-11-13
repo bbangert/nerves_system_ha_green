@@ -62,6 +62,10 @@ BR2_TARGET_UBOOT_CUSTOM_TARBALL_LOCATION="https://github.com/u-boot/u-boot/archi
 BR2_TARGET_UBOOT_BOARD_DEFCONFIG="green"
 BR2_TARGET_UBOOT_PATCH="${NERVES_DEFCONFIG_DIR}/uboot/patches"
 BR2_TARGET_UBOOT_CONFIG_FRAGMENT_FILES="${NERVES_DEFCONFIG_DIR}/uboot/green.fragment"
+# Without this the compiled-in environment is U-Boot's own and the board
+# silently runs `bootflow scan` instead of the boot script (scripts/check-fit.sh
+# looks for the script in the binary).
+BR2_TARGET_UBOOT_DEFAULT_ENV_FILE="${NERVES_DEFCONFIG_DIR}/uboot/uboot.env"
 BR2_TARGET_UBOOT_NEEDS_DTC=y
 BR2_TARGET_UBOOT_NEEDS_PYLIBFDT=y
 BR2_TARGET_UBOOT_NEEDS_PYELFTOOLS=y

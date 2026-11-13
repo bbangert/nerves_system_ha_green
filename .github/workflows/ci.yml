@@ -27,6 +27,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install script-test tools
+        run: |
+          # busybox-static: the install tool runs under busybox ash on the
+          # board. The rest builds U-Boot's sandbox for the boot-script test.
+          sudo apt-get update
+          sudo apt-get install -y busybox-static build-essential bison flex bc \
+            libssl-dev uuid-dev libgnutls28-dev device-tree-compiler \
+            python3-libfdt python3-setuptools swig xxd
+          # fwup isn't in apt. Pinned direct download: a "latest release" lookup
+          # hits the anonymous GitHub API, which is rate-limited per runner IP.
+          curl -fsSL -o /tmp/fwup.deb \
+            "https://github.com/fwup-home/fwup/releases/download/v${FWUP_VERSION}/fwup_${FWUP_VERSION}_amd64.deb"
+          sudo dpkg -i /tmp/fwup.deb
+
+      - run: shellcheck post-build.sh post-createfs.sh scripts/*.sh rootfs_overlay/usr/sbin/green-install-emmc
+
+      - run: scripts/check-env-config.sh
+      - run: scripts/check-no-guid-lookup.sh
+      - run: scripts/test-guards.sh
+
+      - name: Install tool tests (sh, then busybox sh)
+        run: |
+          sh scripts/test-green-install-emmc.sh
+          sh scripts/test-green-install-emmc.sh --break-test
+          busybox sh scripts/test-green-install-emmc.sh
+
+      - name: Cache the U-Boot sandbox build
+        uses: actions/cache@v4
+        with:
+          path: .cache/uboot-sandbox
+          key: uboot-sandbox-${{ hashFiles('uboot/patches/*.patch', 'scripts/test-boot-script.sh', 'scripts/boot-script-test/**') }}
+
+      - name: Boot script tests (U-Boot sandbox)
+        env:
+          DTC: /usr/bin/dtc
+          PYTHON3: /usr/bin/python3
+        run: scripts/test-boot-script.sh --cache .cache/uboot-sandbox
+
       - uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ env.OTP_VERSION }}
@@ -54,8 +92,6 @@ jobs:
           echo "$out"
           failed=$(echo "$out" | sed -n '/^Failed checks:/,$p' | grep '^ensure' || true)
           test -z "$failed"
-
-      - run: shellcheck post-build.sh post-createfs.sh scripts/*.sh
 
   build:
     # Full Buildroot builds are slow, so only on tags or a manual run.

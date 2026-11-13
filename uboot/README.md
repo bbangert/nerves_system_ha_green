@@ -2,18 +2,24 @@
 
 Boot chain:
 
-1. BootROM → the board's stock TPL/SPL (SPI NOR, else eMMC LBA 64–16383; never written by us).
+1. BootROM → the board's stock first stage: an SPL in the SPI NOR (2023.07.02 on the unit examined) or the one in eMMC LBA 64–16383. Which runs first is inferred, not proven; neither is ever written by us.
 2. The SPL loads our `u-boot.itb` from raw LBA 16384 of the SD card if it carries FDT magic there, else of the eMMC.
 3. Our U-Boot runs the boot script below and boots `Image.<slot>` with `booti`.
 
 U-Boot proper is v2026.04 plus Home Assistant OS's Green patches
-(`patches/`), `green_defconfig`, and `green.fragment`: HAOS's own Green
-fragments plus `ENV_SIZE=0x20000`, `VERSION_VARIABLE` and no `sf` command.
-The whole default environment, and so the whole boot logic, is
-`uboot.env`, compiled in through `BR2_TARGET_UBOOT_DEFAULT_ENV_FILE`. Only
-`u-boot.itb` is installed. The stock SPL's FIT contract must hold in the
-resolved config: `SPL_FIT_SIGNATURE=y`, `SPL_SHA256=y`, no `SPL_GZIP` or
-`SPL_LZMA`.
+(`patches/`, unmodified, so no C of ours), `green_defconfig` and
+`green.fragment`. The whole default environment, and so the whole boot
+logic, is `uboot.env`, compiled in through `BR2_TARGET_UBOOT_DEFAULT_ENV_FILE`
+(without it the board would silently run `bootflow scan`). Only `u-boot.itb`
+is installed.
+
+The stock SPL accepts only a FIT of a certain shape:
+uncompressed images, sha256 hashes, `firmware = "atf-1"`. `stock-fit-contract.txt`
+is that shape, derived from the FIT in Home Assistant OS 18.4's Green image,
+and `scripts/check-fit.sh` holds every build to it, together with the
+U-Boot config options behind it (`SPL_FIT_SIGNATURE=y`, `SPL_SHA256=y`, no
+`SPL_GZIP`/`SPL_LZMA`/`ENV_REDUNDANT`/`CMD_SF`, `ENV_IS_NOWHERE=y`,
+`ENV_SIZE=0x20000`).
 
 ## Boot script
 
@@ -86,3 +92,35 @@ RK3568 (the clock driver has no enable op). Once started the dw-wdt only
 stops on reset, so turn it on only after Linux is seen to take it over
 (`dw_wdt` built in, `WATCHDOG_HANDLE_BOOT_ENABLED=y`, then `heart`);
 otherwise the board resets about 89 s into every boot.
+
+## Configuration delta
+
+Every Kconfig difference between the U-Boot this system builds and the
+reference it starts from: `green_defconfig` plus HAOS's own fragments
+(`bootloader/uboot.config` and `board/nabucasa/green/uboot.config` in
+home-assistant/operating-system 18.4), merged the way Buildroot does. Both
+sides leave out `CMD_FILEENV`; HAOS's build additionally carries the C patch
+for it, which this system does not need.
+
+| Option | HAOS reference | Here | Why |
+| --- | --- | --- | --- |
+| `CONFIG_ENV_SIZE` | `0x1f000` | `0x20000` | The state block is 128 KiB in fwup, `fw_env.config` and the env image; U-Boot and fwup both CRC size minus 4 bytes. |
+| `CONFIG_CMD_SF` (and `_TEST`) | `y` | not set | No `sf` command: the SPI NOR holds the factory loader and must never be written. |
+| `CONFIG_ENV_USE_DEFAULT_ENV_TEXT_FILE`, `CONFIG_ENV_DEFAULT_ENV_TEXT_FILE` | not set | `y`, `uboot/uboot.env` | The compiled-in environment is the boot script. Buildroot sets both from `BR2_TARGET_UBOOT_DEFAULT_ENV_FILE`. |
+| `CONFIG_BOOTCOMMAND` | `"bootflow scan -lb"` | gone | Kconfig drops it once the environment comes from a text file; `bootcmd` is in `uboot.env`. |
+| `CONFIG_VERSION_VARIABLE` | not set | `y` | Provides `ver`, which goes on the kernel command line and into the breadcrumbs. |
+| `CONFIG_SYS_PROMPT` | `"HAOS> "` | `"=> "` | `green.fragment` does not carry HAOS's prompt; there is no console, so it is never seen. |
+| `CONFIG_GCC_VERSION` and the compiler banner | host GCC 15.2.0 | Nerves toolchain GCC 15.3.0 | Build environment only. |
+
+To reproduce, from an unpacked U-Boot v2026.04 with `patches/*.patch`
+applied (`$O` outputs are separate directories):
+
+```sh
+make O=$PWD/../ours green_defconfig
+printf 'CONFIG_ENV_USE_DEFAULT_ENV_TEXT_FILE=y\nCONFIG_ENV_DEFAULT_ENV_TEXT_FILE="%s"\n' "$REPO/uboot/uboot.env" >../ours.fragment
+scripts/kconfig/merge_config.sh -m -O ../ours ../ours/.config "$REPO/uboot/green.fragment" ../ours.fragment && make O=$PWD/../ours olddefconfig
+# the reference: the same, merging HAOS's two fragments (minus CMD_FILEENV) instead
+diff ../haos/.config ../ours/.config
+```
+
+Inside a build, ours is `build/uboot-custom/.config` of the Buildroot output.

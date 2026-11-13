@@ -2,7 +2,7 @@
 
 Seeded from nerves_system_rock_4d v0.2.4 (https://github.com/bbangert/nerves_system_rock_4d),
 itself a Nerves system for an RK3576 board; the build scaffolding, fwup
-configs and scripts derive from it.
+configs and some scripts derive from it.
 
 This repository combines content under several licenses. The full license
 texts are in LICENSES/.
@@ -11,6 +11,7 @@ texts are in LICENSES/.
 | --- | --- |
 | Build configuration, fwup configs, scripts, docs (this project's own files) | GPL-2.0-or-later |
 | `linux/*.patch` (Linux kernel device-tree patches) | GPL-2.0-only (kernel license) |
+| `uboot/patches/*.patch` (Home Assistant OS's U-Boot patches for the Green, unmodified; see `uboot/patches/README.md`) | GPL-2.0-or-later (U-Boot's license) |
 | `uboot/rkbin/*.bin`, `uboot/rkbin/*.elf` (committed binaries: RK3566 DDR init, BL31; consumed by U-Boot's binman) | Rockchip proprietary (rockchip-linux/rkbin, `uboot/rkbin/LICENSE` = LICENSES/LICENSE.rockchip-rkbin) |
 
 Downloaded at build time (not in this repository): the Linux kernel
