@@ -48,6 +48,18 @@ against two disk images and checks every case below.
    without a block.** Until then the script uses only literal addresses.
    So neither an older export nor a malformed block can change the disk,
    the script, or, unless it imports cleanly, the slot.
+   **Invariant: no flag or callback binding from a block ever constrains
+   the script.** A block that still declares `.flags` or `.callbacks`
+   after its import counts as absent, so U-Boot never rewrites it either
+   (after a `fw_setenv .flags …` the board boots slot A with the
+   defaults). Every other block is rebuilt before use, from its own binary
+   export (a text one does not escape newlines in names) on top of the
+   compiled-in environment, which drops any binding it left
+   behind by rebinding and deleting those two, and brings back with its
+   default any compiled-in variable it deleted. Step 3 writes only
+   compiled-in variables (also `nerves_save_needed`, `nerves_slot`,
+   `nerves_part`), so it only overwrites and cannot fail, not even when a
+   block fills U-Boot's 521-entry variable table.
 3. **A/B,** the Nerves rule: the first boot of a slot sets
    `nerves_fw_booted=1`; a slot that boots again with
    `nerves_fw_validated=0` is reverted (`nerves_fw_active` flips,
@@ -55,8 +67,8 @@ against two disk images and checks every case below.
    boot.
 4. **Save.** The only raw write U-Boot makes: `env export -c` of the whole
    environment to LBA 0x8000 of the boot disk, only when step 3 changed
-   something and only if the import from that same disk passed its CRC in
-   this boot. **A disk without our valid state block is never written by
+   something and only if the block from that same disk counted in this
+   boot. **A disk without our valid state block is never written by
    U-Boot**; this is what keeps a stock eMMC untouched while the system
    runs from SD. U-Boot cannot hold an empty value, so a key fwup wrote as
    `""` is gone from the block after a U-Boot save (as on every Nerves

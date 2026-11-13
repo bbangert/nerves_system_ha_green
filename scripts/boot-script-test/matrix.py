@@ -473,17 +473,84 @@ def hostile_blocks():
                          "nerves_fw_validated": "1", "nerves_watchdog": "1",
                          "cmdline": "init=/bin/sh"},
                    post=[("", "x")], malformed=True)
-        # Bindings that make the restore itself fail: a type the compiled-in
-        # value does not satisfy, and a callback that rejects it (left behind
-        # by deleting .callbacks through a callback that does not unbind).
+        # Bindings that would make the restore fail: a type the compiled-in
+        # value does not satisfy, and a callback that rejects it, left behind
+        # by deleting .callbacks through a callback that does not unbind. The
+        # rebuild drops the latter, so that block counts.
         yield dict(base, name=f".flags vetoes the restore ({where})", edit=poison,
                    post=[(".flags", "nerves_save:d,nerves_crumbs:d,nerves_go:d")], malformed=True)
-        yield dict(base, name=f".callbacks vetoes the restore ({where})", edit=poison,
+        yield dict(base, name=f"orphaned callbacks on own vars ({where})", edit=poison,
                    post=[(".callbacks", "nerves_save:baudrate,nerves_crumbs:baudrate,"
                                         "nerves_go:baudrate,.callbacks:loadaddr"),
-                         (".callbacks", "")], malformed=True)
+                         (".callbacks", "")])
+        yield from binding_blocks(base, where)
     yield {"name": "stash moved, disk 0 (SD, both ours)", "sd": "ours", "emmc": "ours", "on": "sd",
            "edit": {"nerves_disk": "0", "nerves_stash_addr": "0x10000000"}}
+    for where, sd, emmc in (("SD", "ours", "stock"), ("eMMC", None, "ours")):
+        yield {"name": f"many userspace keys round-trip ({where})", "sd": sd, "emmc": emmc,
+               "on": "sd" if sd else "emmc", "edit": userspace_keys(), "roundtrip": True}
+
+
+# B booted once and never validated: the next boot must revert to A.
+UNVALIDATED_B = {"nerves_fw_active": "b", "nerves_fw_booted": "1", "nerves_fw_validated": "0"}
+
+
+def binding_blocks(base, where):
+    """Blocks whose flag or callback bindings would pin a variable the script
+    sets after the load. A binding still declared at the end of the block
+    rejects it (`malformed`); one whose declaration the block deleted again
+    must be gone, so the block counts and the A/B rule holds."""
+    yield dict(base, name=f".flags pins nerves_fw_active ({where})", edit=UNVALIDATED_B,
+               post=[(".flags", "nerves_fw_active:sr")], malformed=True)
+    pinned = [
+        ("nerves_fw_booted", dict(UNVALIDATED_B, nerves_fw_booted="0")),
+        ("nerves_fw_validated", UNVALIDATED_B),
+        ("nerves_slot", dict(UNVALIDATED_B, nerves_slot="b", nerves_part="4")),
+        ("nerves_save_needed", dict(UNVALIDATED_B, nerves_fw_booted="0", nerves_save_needed="0")),
+        ("bootargs", dict(UNVALIDATED_B, bootargs="root=/dev/mmcblk0p4 init=/bin/sh")),
+    ]
+    for var, edit in pinned:
+        yield dict(base, name=f".flags pins {var} ({where})", edit=edit,
+                   post=[(".flags", f"{var}:sr")], malformed=True)
+    yield dict(base, name=f".callbacks pins nerves_fw_active ({where})", edit=UNVALIDATED_B,
+               post=[(".callbacks", "nerves_fw_active:baudrate")], malformed=True)
+    # .flags is rebound to a callback that ignores it, so deleting it leaves
+    # the per-variable flags set; .callbacks then removes itself the same way.
+    yield dict(base, name=f".flags deleted, pin left ({where})", edit=UNVALIDATED_B,
+               post=[(".flags", "nerves_fw_active:sr,nerves_fw_validated:sr"),
+                     (".callbacks", ".flags:loadaddr,.callbacks:loadaddr"),
+                     (".flags", ""), (".callbacks", "")])
+    yield dict(base, name=f".callbacks deleted, pin left ({where})", edit=UNVALIDATED_B,
+               post=[(".callbacks", "nerves_fw_active:baudrate,nerves_fw_validated:baudrate,"
+                                    ".callbacks:loadaddr"),
+                     (".callbacks", "")])
+    # U-Boot escapes newlines in values but not in names, so a text export
+    # of this block would read back as nerves_fw_active=b.
+    yield dict(base, name=f"newline in a name ({where})", edit={"x\nnerves_fw_active": "b"})
+    # A block can fill U-Boot's 521-entry hash table, so that creating a
+    # variable fails. It cannot stop the A/B rule: nerves_init writes only
+    # compiled-in variables. The block carries every other variable the
+    # script sets, so the boot itself is checked in full.
+    created = {k: "x" for k in ("bootargs", "nerves_uboot_version", "nerves_spl_boot_device",
+                                "nerves_fdt_size", "nerves_crumb_src", "nerves_crumb_size",
+                                "nerves_crumb_file", "filesize", "fileaddr", "fdtaddr")}
+    yield dict(base, name=f"table full, upgrade->b ({where})",
+               edit=dict(created, nerves_fw_active="b", nerves_fw_booted="0",
+                         nerves_fw_validated="0"),
+               post=[(f"fill{i:03d}", "x") for i in range(600)], full=True)
+
+
+def userspace_keys():
+    """What a long-lived Nerves device accumulates. No backslashes: U-Boot's
+    import takes them as escapes, so a raw one written by fwup or fw_setenv
+    never survives."""
+    keys = {f"nerves_fw_app{i}": f"value {i} with = and spaces" for i in range(150)}
+    keys.update({"a.nerves_fw_uuid": "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+                 "b.nerves_fw_uuid": "6fa459ea-ee8a-3ca4-894e-db77e160355e",
+                 "a.nerves_fw_validated": "1", "b.nerves_fw_validated": "0",
+                 "nerves_serial_number": "GREEN-0001", "x-dash.dot": "1",
+                 "multi": "line one\nline two", "UPPER": "#not a comment"})
+    return keys
 
 
 def upgrade(state, target):
@@ -534,7 +601,8 @@ def run_scenario(runner, fixture, sc):
             # U-Boot cannot hold an empty value (`setenv x ""` deletes x), so
             # only non-empty keys must survive its save, as on any Nerves board.
             original_keys[name] = {k: v for k, v in d.state().items()
-                                   if v and k.startswith(("a.", "b.", "nerves_serial"))}
+                                   if v and (sc.get("roundtrip") and k in sc["edit"]
+                                             or k.startswith(("a.", "b.", "nerves_serial")))}
     memfile = None
     ram = None
     if sc.get("ramoops"):
@@ -558,6 +626,10 @@ def run_scenario(runner, fixture, sc):
                 failures.append(f"{tag}: {msg}")
 
         check("@@TIMEOUT" not in out, "sandbox timed out")
+        if sc.get("full") and boot == 0:
+            # Later boots import U-Boot's own save of the full table, which
+            # fills it exactly and so prints nothing.
+            check("can't insert" in out, "the block did not fill the variable table")
         want_outcome = "boot" if exp["boots"] else "reset"
         check(got["outcome"] == want_outcome, f"outcome {got['outcome']}, want {want_outcome}")
         check(got.get("disk") == str(exp["disk"]), f"disk {got.get('disk')}, want {exp['disk']}")
@@ -679,6 +751,7 @@ def main():
     p = argparse.ArgumentParser()
     for a in ("uboot", "mkenvimage", "dtc", "src", "build", "env", "repo", "work"):
         p.add_argument("--" + a, required=True)
+    p.add_argument("--only", help="run only the scenarios whose name matches this regex")
     args = p.parse_args()
     shutil.rmtree(args.work, ignore_errors=True)
     os.makedirs(args.work)
@@ -687,6 +760,8 @@ def main():
     all_failures = owned_check(args.env)
     print(f"{'scenario':<44} {'boot':>4}  {'disk':>4} {'state':<5} {'slot':<4} {'saved':<5} result")
     for sc in scenarios():
+        if args.only and not re.search(args.only, sc["name"]):
+            continue
         rows, failures = run_scenario(runner, fixture, sc)
         for tag, exp, got, changed in rows:
             n = tag.rsplit(" ", 1)[1]
