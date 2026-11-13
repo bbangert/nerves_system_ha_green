@@ -32,7 +32,7 @@ jobs:
           # busybox-static: the install tool runs under busybox ash on the
           # board. The rest builds U-Boot's sandbox for the boot-script test.
           sudo apt-get update
-          sudo apt-get install -y busybox-static build-essential bison flex bc \
+          sudo apt-get install -y busybox-static strace build-essential bison flex bc \
             libssl-dev uuid-dev libgnutls28-dev device-tree-compiler \
             python3-libfdt python3-setuptools swig xxd
           # fwup isn't in apt. Pinned direct download: a "latest release" lookup

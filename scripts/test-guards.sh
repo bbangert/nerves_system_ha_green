@@ -4,7 +4,8 @@
 # the repo files and fabricated inputs. A guard that never fails is worth
 # nothing, and a violation the guard shrugs off is worse than none.
 #
-# Needs python3 and fwup. Usage: scripts/test-guards.sh
+# Needs python3 and fwup; strace for the write-syscall rows, which are
+# reported as SKIPPED without it. Usage: scripts/test-guards.sh
 
 # The single-quoted mutations below are literal fwup/U-Boot variable references.
 # shellcheck disable=SC2016
@@ -21,6 +22,9 @@ FAILS=0
 command -v fwup >/dev/null || { echo "test-guards: fwup is required" >&2; exit 2; }
 FWUP_REAL=$(command -v fwup)
 export FWUP_REAL
+HAVE_STRACE=
+command -v strace >/dev/null && HAVE_STRACE=1
+SKIPS=0
 
 row() {
     printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$ROWS"
@@ -40,6 +44,16 @@ expect_fail() {
     else
         row "$inv" "$viol" "FAILED FOR THE WRONG REASON (exit $rc): $(echo "$out" | head -n 2 | tr '\n' ' ' | cut -c1-120)"
         FAILS=$((FAILS + 1))
+    fi
+}
+
+# expect_traced: expect_fail for a row only the write-syscall trace can see.
+expect_traced() {
+    if [ -n "$HAVE_STRACE" ]; then
+        expect_fail "$@"
+    else
+        row "$1" "$2" "SKIPPED: no strace"
+        SKIPS=$((SKIPS + 1))
     fi
 }
 
@@ -109,8 +123,10 @@ fresh_conf() {
     cp "$REPO/fwup.conf" "$T"/conf-mut
 }
 
-# loader_case <violation> <message fragment> <mutation function>
+# loader_case <violation> <message fragment> <mutation function> [trace fragment]
 # The mutation edits $T/conf-mut, or fwup-common.conf through EDIT_COMMON.
+# With a trace fragment, a second row requires the write-syscall trace to
+# catch the same mutation on its own.
 loader_case() {
     viol=$1 pat=$2
     fresh_conf
@@ -118,6 +134,8 @@ loader_case() {
     "$3"
     if build_fw "$T"/conf-mut "$T"/mut.fw; then
         expect_fail "no write to LBA 64-16383 (fwup)" "$viol" "$pat" "$S"/check-loader-area.sh "$T"/mut.fw
+        [ -z "${4:-}" ] ||
+            expect_traced "no write syscall below 8 MiB (fwup)" "$viol" "$4" "$S"/check-loader-area.sh "$T"/mut.fw
     else
         row "no write to LBA 64-16383 (fwup)" "$viol" "FIXTURE: fwup rejected the mutated conf: $(head -n 1 "$T"/fwup.err | cut -c1-100)"
         FAILS=$((FAILS + 1))
@@ -130,12 +148,40 @@ loader_case() {
 fresh_conf
 build_fw "$T"/conf-mut "$T"/good.fw
 fwup -c -f "$REPO"/fwup-ops.conf -o "$T"/ops.fw
-expect_ok "no write to LBA 64-16383 (fwup)" "repo fwup.conf, static + dynamic" "$S"/check-loader-area.sh "$T"/good.fw
+expect_ok "no write to LBA 64-16383 (fwup)" "repo fwup.conf + fwup-ops.conf, static + dynamic" "$S"/check-loader-area.sh "$T"/good.fw "$T"/ops.fw
 expect_ok "no write to LBA 64-16383 (fwup)" "repo fwup-ops.conf, static" "$S"/check-loader-area.sh --static-only "$T"/ops.fw
+if [ -n "$HAVE_STRACE" ]; then
+    out=$("$S"/check-loader-area.sh "$T"/good.fw "$T"/ops.fw 2>&1)
+    for t in install.a install.b upgrade.a upgrade.b factory-reset prevent-revert.a revert.a validate.a; do
+        if echo "$out" | grep -q "traced.* ${t}[ :]"; then
+            row "every eMMC-capable task is traced" "$t" "traced"
+        else
+            row "every eMMC-capable task is traced" "$t" "NOT TRACED"
+            FAILS=$((FAILS + 1))
+        fi
+    done
+else
+    row "every eMMC-capable task is traced" "all" "SKIPPED: no strace"
+    SKIPS=$((SKIPS + 1))
+fi
 
 m_raw64() { subst "$T"/conf-mut 'raw_write(${ROOTFS_A_PART_OFFSET})' 'raw_write(64)'; }
 m_memset() { subst "$T"/conf-mut 'raw_memset(${ROOTFS_B_PART_OFFSET}, 256, 0xff)' 'raw_memset(100, 8, 0xff)'; }
 m_trim() { subst "$T"/conf-mut 'trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})' 'trim(100, 8)'; }
+m_trim0() { subst "$T"/conf-mut 'trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})' 'trim(0, 256)'; }
+m_trim0_complete() { subst "$T"/conf-mut '        gpt_write(gpt-sd)
+' '        gpt_write(gpt-sd)
+        trim(0, 256)
+'; }
+m_gpt_install() { subst "$T"/conf-mut '        info("Installing to the eMMC")
+' '        info("Installing to the eMMC")
+        gpt_write(gpt-emmc)
+'; }
+m_gpt_newtask() { printf '\ntask repartition {\n    on-init { gpt_write(gpt-sd) }\n}\n' >>"$T"/conf-mut; }
+m_upgrade256() { subst "$T"/conf-mut 'delta-source-raw-count=${ROOTFS_B_PART_COUNT}
+        raw_write(${ROOTFS_A_PART_OFFSET})' 'delta-source-raw-count=${ROOTFS_B_PART_COUNT}
+        raw_write(256)'; }
+m_unaligned() { subst "$T"/conf-mut '# Reset the validation status and boot to B next time.' 'raw_memset(16380, 8, 0)'; }
 m_fat() { subst "$T"/conf-mut 'fat_write(${BOOT_PART_OFFSET}, "Image.a")' 'fat_write(100, "Image.a")'; }
 ed_gptpart() { subst "$1" 'define!(ENV_PART_OFFSET, 32768)' 'define!(ENV_PART_OFFSET, 100)'; }
 m_gptpart() { EDIT_COMMON=ed_gptpart; }
@@ -152,7 +198,16 @@ m_idblock() {
 
 loader_case "raw_write(64) of the rootfs" "inside the stock loader area" m_raw64
 loader_case "raw_memset over LBA 100" "inside the stock loader area" m_memset
-loader_case "trim over LBA 100" "inside the stock loader area" m_trim
+loader_case "trim over LBA 100" "trims fwup cache segment LBA 0-255" m_trim
+loader_case "trim(0, 256) in upgrade.a" "trims fwup cache segment LBA 0-255" m_trim0
+loader_case "trim(0, 256) in complete (SD-only)" "trims fwup cache segment LBA 0-255" m_trim0_complete
+loader_case "gpt_write re-added to install.a" "install.a on-init gpt_write(gpt-emmc): dirties fwup cache segment LBA 0-255" m_gpt_install \
+    "traced task install.a: pwrite64 of bytes 0..131071"
+loader_case "new task with a gpt_write, not on the SD-only list" "task repartition on-init gpt_write(gpt-sd): dirties fwup cache segment LBA 0-255" m_gpt_newtask
+loader_case "raw_write(256) of the rootfs in upgrade.a" "raw_write(256): dirties fwup cache segment LBA 256-" m_upgrade256 \
+    "traced task upgrade.a: pwrite64 of bytes 131072.."
+loader_case "unaligned raw_memset at LBA 16380 in upgrade.b" "dirties fwup cache segment LBA 16128-16639" m_unaligned \
+    "traced task upgrade.b: pwrite64 of bytes 8257536.."
 loader_case "fat_write at partition offset LBA 100" "FAT offset LBA 100" m_fat
 loader_case "GPT partition starting at LBA 100" "starts at LBA 100" m_gptpart
 loader_case "state block moved to LBA 64" "inside the stock loader area" m_envblock
@@ -175,6 +230,22 @@ chmod +x "$T"/badfwup
 expect_fail "no write to LBA 64-16383 (fwup)" "byte changed at 1 MiB after applying complete" "task complete changed byte 1048576" \
     env FWUP="$T"/badfwup "$S"/check-loader-area.sh "$T"/good.fw
 
+# Content checks cannot see a sector rewritten with its own bytes, which is
+# what fwup's segment read-modify-write does; only the trace can.
+cat >"$T"/samefwup <<'SAMEFWUP'
+#!/bin/sh
+"$FWUP_REAL" "$@" || exit $?
+case " $* " in *" -t install.a "*) ;; *) exit 0 ;; esac
+while [ $# -gt 0 ]; do
+    [ "$1" = -d ] && img=$2
+    shift
+done
+dd if="$img" of="$img" bs=512 skip=100 seek=100 count=1 conv=notrunc 2>/dev/null
+SAMEFWUP
+chmod +x "$T"/samefwup
+expect_traced "no write syscall below 8 MiB (fwup)" "install.a rewrites LBA 100 with its own bytes" "traced task install.a: write of bytes 51200..51711" \
+    env FWUP="$T"/samefwup "$S"/check-loader-area.sh "$T"/good.fw
+
 python3 -I - "$IMG/u-boot.itb" <<'PY'
 import sys
 open(sys.argv[1], "wb").write(b"\xa5" * (1 << 20))
@@ -184,6 +255,33 @@ build_fw "$T"/conf-mut "$T"/nomagic.fw
 expect_fail "FIT at 8 MiB after complete" "u-boot.itb without FDT magic" "no FIT magic at 8 MiB" "$S"/check-loader-area.sh "$T"/nomagic.fw
 printf 'not a zip' >"$T"/junk.fw
 expect_fail "readable .fw" "file that is not a zip" "cannot read as a .fw" "$S"/check-loader-area.sh "$T"/junk.fw
+
+# --- destination checks: fwup cannot see which device -d names, so the SD
+# card and the eMMC are told apart by what complete and install wrote.
+
+dest_fw() {
+    sed '/require-path-on-device/d' "$1" >"$T"/dest.conf
+    [ -z "${2:-}" ] || sed -i "/$2/d" "$T"/dest.conf
+    build_fw "$T"/dest.conf "$3"
+}
+dest_fw "$REPO"/fwup.conf "" "$T"/sys-loose.fw
+dest_fw "$REPO"/fwup-ops.conf "" "$T"/ops-loose.fw
+dest_fw "$REPO"/fwup-ops.conf 'require-fat-file-exists(${BOOT_PART_OFFSET}, "medium.sd")' "$T"/ops-nomedium.fw
+rm -f "$T"/sd.img "$T"/emmc.img
+truncate -s 3G "$T"/sd.img "$T"/emmc.img
+fwup -a -q -d "$T"/sd.img -t complete -i "$T"/good.fw
+fwup -a -q -d "$T"/emmc.img -t install -i "$T"/sys-loose.fw >/dev/null
+cp --sparse=always "$T"/emmc.img "$T"/emmc.ref
+I="expand-data and complete stay off the eMMC"
+expect_ok "$I" "expand-data on an SD that complete wrote" fwup -a -q -d "$T"/sd.img -t expand-data -i "$T"/ops-loose.fw
+expect_fail "$I" "expand-data aimed at an eMMC that install wrote" "Not expanding" \
+    fwup -a -q -d "$T"/emmc.img -t expand-data -i "$T"/ops-loose.fw
+expect_fail "$I" "complete aimed at an eMMC that install wrote" "is an installed eMMC" \
+    fwup -a -q -d "$T"/emmc.img -t complete -i "$T"/good.fw
+expect_ok "$I" "refusals left the eMMC image unchanged" cmp "$T"/emmc.img "$T"/emmc.ref
+expect_ok "$I" "control: without the medium.sd check expand-data does run there" \
+    fwup -a -q -d "$T"/emmc.img -t expand-data -i "$T"/ops-nomedium.fw
+expect_ok "$I" "complete re-writes an SD that complete wrote" fwup -a -q -d "$T"/sd.img -t complete -i "$T"/good.fw
 
 # --- FIT
 
@@ -303,6 +401,8 @@ cat >"$T"/kernel.config <<'EOF'
 # CONFIG_SPI_ROCKCHIP_SFC is not set
 # CONFIG_MTD_SPI_NOR is not set
 # CONFIG_FIQ_DEBUGGER is not set
+# CONFIG_DEVMEM is not set
+# CONFIG_MMC_TEST is not set
 CONFIG_MALI_BIFROST=y
 CONFIG_ROCKCHIP_RKNPU=y
 CONFIG_ROCKCHIP_MPP_SERVICE=y
@@ -327,6 +427,8 @@ kcase_on ROCKCHIP_VENDOR_STORAGE_UPDATE_LOADER y
 kcase_on SPI_ROCKCHIP_SFC y
 kcase_on MTD_SPI_NOR m
 kcase_on FIQ_DEBUGGER y
+kcase_on DEVMEM y
+kcase_on MMC_TEST m
 cp "$T"/kernel.config "$T"/kernel.mut
 echo 'CONFIG_ROCKCHIP_MMC_VENDOR_STORAGE=y' >>"$T"/kernel.mut
 expect_fail "kernel cannot write the loader area or NOR" "CONFIG_ROCKCHIP_MMC_VENDOR_STORAGE=y" "CONFIG_ROCKCHIP_MMC_VENDOR_STORAGE is enabled" "$S"/check-kernel-config.sh "$T"/kernel.mut
@@ -373,4 +475,8 @@ if [ "$FAILS" -ne 0 ]; then
     echo "test-guards: $FAILS of $total checks FAILED" >&2
     exit 1
 fi
-echo "test-guards: all $total checks behaved"
+if [ "$SKIPS" -ne 0 ]; then
+    echo "test-guards: all $total checks behaved; $SKIPS SKIPPED (no strace): the write-syscall trace was not tested" >&2
+else
+    echo "test-guards: all $total checks behaved"
+fi

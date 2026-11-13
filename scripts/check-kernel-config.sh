@@ -3,8 +3,10 @@
 # Checks the merged kernel .config. Rockchip vendor storage writes eMMC LBA
 # 7168-7679 (inside the stock loader area, e.g. a random MAC from dwmac-rk),
 # and the SFC/SPI-NOR drivers would expose the factory loader in the NOR, so
-# none of them may be enabled. The other options are what the planned
-# accelerator, RTC and ramoops/watchdog diagnostics depend on.
+# none of them may be enabled. /dev/mem would let root program the unclaimed
+# SFC through its MMIO, and mmc_test writes raw test patterns to whatever
+# card it binds. The other options are what the planned accelerator, RTC and
+# ramoops/watchdog diagnostics depend on.
 #
 # Usage: check-kernel-config.sh <kernel .config>
 
@@ -16,7 +18,7 @@ CONFIG=${1:?usage: check-kernel-config.sh <kernel .config>}
 rc=0
 for sym in ROCKCHIP_VENDOR_STORAGE ROCKCHIP_MMC_VENDOR_STORAGE \
     ROCKCHIP_VENDOR_STORAGE_UPDATE_LOADER SPI_ROCKCHIP_SFC MTD_SPI_NOR \
-    FIQ_DEBUGGER; do
+    FIQ_DEBUGGER DEVMEM MMC_TEST; do
     if grep -q "^CONFIG_${sym}=[ym]" "$CONFIG"; then
         echo "check-kernel-config: FAIL CONFIG_$sym is enabled in $CONFIG; it can write the stock loader area or the SPI NOR" >&2
         rc=1

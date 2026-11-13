@@ -21,4 +21,6 @@ trap 'rm -rf "$GUARD_TMP"' EXIT
 NERVES_SYSTEM=$BASE_DIR NERVES_SDK_IMAGES=$BINARIES_DIR NERVES_SDK_VERSION=guard \
     NERVES_FW_VCS_IDENTIFIER=guard NERVES_FW_MISC="" \
     "$FWUP" -c -f "$FWUP_CONFIG" -o "$GUARD_TMP"/system.fw
-TMPDIR=$GUARD_TMP "$BOARD_DIR"/scripts/check-loader-area.sh "$GUARD_TMP"/system.fw
+# ops.fw is traced against the disk image complete lays down.
+TMPDIR=$GUARD_TMP "$BOARD_DIR"/scripts/check-loader-area.sh "$GUARD_TMP"/system.fw \
+    "$TARGET_DIR"/usr/share/fwup/ops.fw
