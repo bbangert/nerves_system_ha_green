@@ -56,7 +56,10 @@ def env_parse(block):
 
 
 def env_build(variables):
-    data = b"".join(f"{k}={v}".encode() + b"\0" for k, v in variables.items())
+    """A dict, or a list of (key, value) pairs for blocks with repeated or
+    empty keys; an empty value is U-Boot's delete entry."""
+    pairs = variables.items() if isinstance(variables, dict) else variables
+    data = b"".join(f"{k}={v}".encode() + b"\0" for k, v in pairs)
     data = data + b"\0"
     data = data + b"\0" * (ENV_SIZE - 4 - len(data))
     return zlib.crc32(data).to_bytes(4, "little") + data
@@ -283,7 +286,7 @@ def model(sd_kind, emmc_kind, sd_state, emmc_state):
     disk = 1 if sd_kind is not None and has_fit(sd_kind) else 0
     kind = sd_kind if disk == 1 else emmc_kind
     stored = sd_state if disk == 1 else emmc_state
-    env = dict(DEFAULTS)
+    env = dict(DEFAULTS, cmdline="")
     if stored is not None:
         env.update(stored)
     save = False
@@ -307,6 +310,7 @@ def model(sd_kind, emmc_kind, sd_state, emmc_state):
         "new": {k: env[k] for k in ("nerves_fw_active", "nerves_fw_validated",
                                     "nerves_fw_booted")},
         "watchdog": env["nerves_watchdog"] == "1",
+        "cmdline": env["cmdline"].split(),
         "medium": "sd" if disk == 1 else "emmc",
     }
 
@@ -436,6 +440,50 @@ def scenarios():
            "edit": {"nerves_disk": "1", "bootargs": "root=/dev/bogus", "ver": "U-Boot 1999.01",
                     "nerves_go": "echo POISON", "nerves_owned": "bootcmd",
                     "nerves_state": "ok", "kernel_addr_r": "0x0"}}
+    yield from hostile_blocks()
+
+
+def hostile_blocks():
+    """CRC-valid blocks that try to make U-Boot write the other disk, or a
+    partial import that tries to steer the boot. `malformed`: the block must
+    count as absent (slot A, no save); otherwise it is imported normally and
+    only the script's own variables are put back."""
+    for where, sd, emmc, other in (("SD", "ours", "stock", 0), ("eMMC", "dataonly", "ours", 1)):
+        on = "sd" if where == "SD" else "emmc"
+        poison = {"nerves_crumbs": f"mmc dev {other}; mmc write 0x12000000 0x8000 0x1",
+                  "nerves_save": f"mmc dev {other}; mmc write ${{nerves_state_addr}} 0x40 0x10",
+                  "nerves_go": f"mmc dev {other}; mmc write 0x12000000 0x4000 0x1; poweroff"}
+        base = {"sd": sd, "emmc": emmc, "on": on}
+        yield dict(base, name=f"empty key after poisoned code ({where})", edit=poison,
+                   post=[("", "x")], malformed=True)
+        yield dict(base, name=f"empty key first ({where})", pre=[("", "x")],
+                   edit=dict(poison, nerves_fw_active="b", nerves_fw_booted="1",
+                             nerves_fw_validated="0"), malformed=True)
+        yield dict(base, name=f"stash moved, disk {other} ({where})",
+                   edit={"nerves_disk": str(other), "nerves_stash_addr": "0x10000000"})
+        yield dict(base, name=f"stash moved, ver+fdt deleted ({where})",
+                   edit={"nerves_stash_addr": "0x10000000", "ver": "U-Boot 1999.01"},
+                   post=[("fdtcontroladdr", ""), ("nerves_disk", "")])
+        yield dict(base, name=f"nerves_state=ok + empty key ({where})",
+                   edit=dict(poison, nerves_state="ok"), post=[("", "x")], malformed=True)
+        yield dict(base, name=f"short nerves_owned ({where})",
+                   edit=dict(poison, nerves_owned="bootcmd", nerves_state="ok"))
+        yield dict(base, name=f"partial: slot b, wdt, cmdline ({where})",
+                   edit={"nerves_fw_active": "b", "nerves_fw_booted": "1",
+                         "nerves_fw_validated": "1", "nerves_watchdog": "1",
+                         "cmdline": "init=/bin/sh"},
+                   post=[("", "x")], malformed=True)
+        # Bindings that make the restore itself fail: a type the compiled-in
+        # value does not satisfy, and a callback that rejects it (left behind
+        # by deleting .callbacks through a callback that does not unbind).
+        yield dict(base, name=f".flags vetoes the restore ({where})", edit=poison,
+                   post=[(".flags", "nerves_save:d,nerves_crumbs:d,nerves_go:d")], malformed=True)
+        yield dict(base, name=f".callbacks vetoes the restore ({where})", edit=poison,
+                   post=[(".callbacks", "nerves_save:baudrate,nerves_crumbs:baudrate,"
+                                        "nerves_go:baudrate,.callbacks:loadaddr"),
+                         (".callbacks", "")], malformed=True)
+    yield {"name": "stash moved, disk 0 (SD, both ours)", "sd": "ours", "emmc": "ours", "on": "sd",
+           "edit": {"nerves_disk": "0", "nerves_stash_addr": "0x10000000"}}
 
 
 def upgrade(state, target):
@@ -465,8 +513,8 @@ def run_scenario(runner, fixture, sc):
     if not sc["sd"] and os.path.exists(runner.sd):
         os.unlink(runner.sd)
     emmc = make_disk(fixture, sc["emmc"], "emmc", runner.emmc)
-    target = None
-    for d in (sd, emmc):
+    edited = set()
+    for name, d in (("sd", sd), ("emmc", emmc)):
         if d is None:
             continue
         st = d.state()
@@ -474,8 +522,12 @@ def run_scenario(runner, fixture, sc):
             continue
         if sc.get("upgrade"):
             st = upgrade(st, sc["upgrade"])
-        st.update(sc.get("edit", {}))
+        if sc.get("on", name) == name:
+            st.update(sc.get("edit", {}))
+            st = sc.get("pre", []) + list(st.items()) + sc.get("post", [])
+            edited.add(name)
         d.set_state(st)
+    absent = edited if sc.get("malformed") else set()
     original_keys = {}
     for name, d in (("sd", sd), ("emmc", emmc)):
         if d and d.state():
@@ -490,8 +542,8 @@ def run_scenario(runner, fixture, sc):
     for boot in range(3):
         if memfile:
             ram = make_memfile(memfile, 512 << 20)
-        sd_state = sd.state() if sd else None
-        emmc_state = emmc.state()
+        sd_state = sd.state() if sd and "sd" not in absent else None
+        emmc_state = emmc.state() if "emmc" not in absent else None
         exp = model(sc["sd"], sc["emmc"], sd_state, emmc_state)
         before = {"sd": sd.hashes() if sd else None, "emmc": emmc.hashes()}
         out = runner.boot(sd is not None, sc.get("spl", False), memfile)
@@ -520,6 +572,11 @@ def run_scenario(runner, fixture, sc):
                   "bootargs uboot.version")
             cons = [a for a in args if a.startswith("console=")]
             check(cons == ["console=ttyS2,1500000n8", "console=tty0"], f"consoles {cons}")
+            want_args = [f"root=/dev/mmcblk{exp['disk']}p{part}", "rootfstype=squashfs", "rootwait",
+                         "console=ttyS2,1500000n8", "console=tty0",
+                         f"uboot.boot_disk=mmcblk{exp['disk']}"] + exp["cmdline"]
+            check([a for a in args if not a.startswith("uboot.version=")] == want_args,
+                  f"bootargs {got.get('bootargs')}, want {' '.join(want_args)} + uboot.version")
             check(got.get("kernel") == f"IMAGE.{exp['slot']}@{exp['medium']}",
                   f"kernel {got.get('kernel')}")
             check(got.get("dtb") == f"DTB.{exp['slot']}@{exp['medium']}", f"dtb {got.get('dtb')}")

@@ -36,11 +36,18 @@ against two disk images and checks every case below.
    128 KiB of p1, what `fw_env.config` and fwup address) are imported with
    `env import -c`. A missing, corrupt or foreign block fails its CRC, and
    the boot goes on with the compiled-in defaults: slot A, validated.
-   After a good import the script's own variables (the list in
-   `nerves_owned`) go back to their compiled-in values, and the values
+   The script's own variables (the list in `nerves_owned`) and the values
    U-Boot computed this boot (`ver`, `fdtcontroladdr`, `serial#`,
-   `ethaddr`, `nerves_disk`) come back from a RAM stash, so whatever an
-   older export left in the block cannot change this boot.
+   `ethaddr`, `nerves_disk`, `nerves_state`) are copied to RAM before the
+   import and put back from that copy after it. **Invariant: after an import
+   the script acts on no variable until those variables are shown to
+   equal the copy (re-exported and compared byte for byte; a changed name
+   list changes the export too); if they do not, or
+   the import failed even part-way (an empty key), the whole environment
+   is reset to the compiled-in one plus the copy, which is exactly a boot
+   without a block.** Until then the script uses only literal addresses.
+   So neither an older export nor a malformed block can change the disk,
+   the script, or, unless it imports cleanly, the slot.
 3. **A/B,** the Nerves rule: the first boot of a slot sets
    `nerves_fw_booted=1`; a slot that boots again with
    `nerves_fw_validated=0` is reverted (`nerves_fw_active` flips,
