@@ -210,6 +210,13 @@ def check_static(fw, zf, v):
                     if s0 <= LOADER_LAST:
                         v.add(tag, "trims fwup cache segment LBA %d-%d, which overlaps LBA 0-%d"
                               % (s0, s1, LOADER_LAST))
+                    # Never legitimate: u-boot.itb lives there and a discard
+                    # would take U-Boot proper with it. Judged on the segments
+                    # the range touches, the conservative side of however fwup
+                    # rounds a trim.
+                    if s0 <= WINDOW_LAST and s1 >= WINDOW_FIRST:
+                        v.add(tag, "trims fwup cache segment LBA %d-%d, which overlaps the FIT window %d-%d"
+                              % (s0, s1, WINDOW_FIRST, WINDOW_LAST))
                     continue
                 seg_rule(tag, off, last, sd_only)
                 span(off, last, tname, tag,

@@ -209,6 +209,134 @@ def pwritev2_at_current_position_is_whole_file():
     return expect_hit(trace(OPEN, "100 pwritev2(%s, [...], 1, -1, 0) = 3" % TGT))
 
 
+@case
+def write_advances_by_the_return_value():
+    got = trace(OPEN, "100 write(%s, \"\"..., 100) = 60" % TGT, "100 write(%s, \"\"..., 10) = 10" % TGT)
+    if got != [(0, 60, "write"), (60, 70, "write")]:
+        return "got %r" % (got,)
+
+
+@case
+def write_failed_records_nothing_and_keeps_position():
+    got = trace(OPEN, "100 write(%s, \"\"..., 100) = -1 ENOSPC (No space left on device)" % TGT,
+                "100 write(%s, \"\"..., 10) = 10" % TGT)
+    if got != [(0, 10, "write")]:
+        return "got %r" % (got,)
+
+
+@case
+def write_zero_return_records_nothing():
+    got = trace(OPEN, "100 write(%s, \"\"..., 100) = 0" % TGT, "100 write(%s, \"\"..., 10) = 10" % TGT)
+    if got != [(0, 10, "write")]:
+        return "got %r" % (got,)
+
+
+@case
+def write_unfinished_resumed_uses_the_return_value():
+    got = trace(OPEN, "100 write(%s, \"\"..., 100 <unfinished ...>" % TGT, "101 write(1</dev/null>, \"\"..., 1) = 1",
+                "100 <... write resumed>) = 60", "100 write(%s, \"\"..., 10) = 10" % TGT)
+    if got != [(0, 60, "write"), (60, 70, "write")]:
+        return "got %r" % (got,)
+
+
+@case
+def write_unfinished_never_resumed_is_whole_file():
+    return expect_hit(trace(OPEN, "100 write(%s, \"\"..., 100 <unfinished ...>" % TGT), "unfinished")
+
+
+@case
+def write_unfinished_with_a_seek_meanwhile_is_whole_file():
+    return expect_hit(trace(OPEN, "100 clone(child_stack=NULL, flags=CLONE_VM|CLONE_FILES) = 101",
+                            "100 write(%s, \"\"..., 100 <unfinished ...>" % TGT,
+                            "101 lseek(%s, 4096, SEEK_SET) = 4096" % TGT,
+                            "100 <... write resumed>) = 100"), "unknown offset")
+
+
+@case
+def write_result_unknown_loses_the_position():
+    got = trace(OPEN, "100 write(%s, \"\"..., 100) = ?" % TGT, "100 write(%s, \"\"..., 10) = 10" % TGT)
+    if [w[2] for w in whole(got)] != ["write result unknown", "write at an unknown offset"]:
+        return "got %r" % (got,)
+
+
+@case
+def pwrite64_short_write_uses_the_return_value():
+    got = trace(OPEN, "100 pwrite64(%s, \"\"..., 512, 4096) = 100" % TGT)
+    if got != [(4096, 4196, "pwrite64")]:
+        return "got %r" % (got,)
+
+
+@case
+def pwrite64_failed_records_nothing():
+    return expect_none(trace(OPEN, "100 pwrite64(%s, \"\"..., 512, 4096) = -1 EIO (Input/output error)" % TGT))
+
+
+@case
+def pwrite64_unfinished_resumed_uses_the_return_value():
+    got = trace(OPEN, "100 pwrite64(%s, \"\"..., 512, 4096 <unfinished ...>" % TGT,
+                "100 <... pwrite64 resumed>) = 100")
+    if got != [(4096, 4196, "pwrite64")]:
+        return "got %r" % (got,)
+
+
+@case
+def fcntl_setfl_append_is_whole_file():
+    return expect_hit(trace(OPEN, "100 fcntl(%s, F_SETFL, O_RDWR|O_APPEND|O_LARGEFILE) = 0" % TGT), "O_APPEND")
+
+
+@case
+def fcntl_setfl_without_append_is_ignored():
+    return expect_none(trace(OPEN, "100 fcntl(%s, F_SETFL, O_RDWR|O_NONBLOCK) = 0" % TGT,
+                             "100 fcntl(%s, F_GETFL) = 0x8002 (flags O_RDWR|O_LARGEFILE)" % TGT))
+
+
+@case
+def fcntl_setfl_append_failed_is_ignored():
+    return expect_none(trace(OPEN, "100 fcntl(%s, F_SETFL, O_RDWR|O_APPEND) = -1 EPERM (Operation not permitted)" % TGT))
+
+
+@case
+def fcntl_setfl_append_on_other_file_is_ignored():
+    return expect_none(trace("100 fcntl(%s, F_SETFL, O_RDWR|O_APPEND) = 0" % OTH))
+
+
+def pwritev2(flags, off="4096", ret="3"):
+    return "100 pwritev2(%s, [...], 1, %s, %s) = %s" % (TGT, off, flags, ret)
+
+
+@case
+def pwritev2_rwf_append_is_whole_file():
+    return expect_hit(trace(OPEN, pwritev2("RWF_APPEND")), "RWF_APPEND")
+
+
+@case
+def pwritev2_rwf_append_among_other_flags():
+    return expect_hit(trace(OPEN, pwritev2("RWF_DSYNC|RWF_APPEND")), "RWF_APPEND")
+
+
+@case
+def pwritev2_numeric_flags_with_the_append_bit():
+    return expect_hit(trace(OPEN, pwritev2("0x10")), "RWF_APPEND") or \
+        expect_hit(trace(OPEN, pwritev2("RWF_DSYNC|0x10")), "RWF_APPEND")
+
+
+@case
+def pwritev2_flags_that_do_not_move_the_data_stay_ranged():
+    got = trace(OPEN, pwritev2("RWF_DSYNC|RWF_SYNC|RWF_HIPRI|RWF_NOWAIT"), pwritev2("0x2"))
+    if got != [(4096, 4099, "pwritev2")] * 2:
+        return "got %r" % (got,)
+
+
+@case
+def pwritev2_rwf_append_failed_records_nothing():
+    return expect_none(trace(OPEN, pwritev2("RWF_APPEND", ret="-1 EOPNOTSUPP (Operation not supported)")))
+
+
+@case
+def pwritev2_rwf_append_on_other_file_is_ignored():
+    return expect_none(trace("100 pwritev2(%s, [...], 1, 0, RWF_APPEND) = 3" % OTH))
+
+
 RO_MAP = mmap(TGT, "PROT_READ", "MAP_SHARED")
 MPROT = "100 mprotect(0x7f3a5c000000, 8192, %s) = %s"
 
@@ -340,6 +468,18 @@ os.writev(fd, [b"abc", b"de"])
 os.pwritev(fd, [b"xyz"], 4096)
 """, lambda w: None if w == [(1000, 1005, "writev"), (4096, 4099, "pwritev2")] or w == [(1000, 1005, "writev"), (4096, 4099, "pwritev")]
    else "got %r" % (w,))
+
+real("strace_pwritev2_rwf_append", PRE + """
+if not hasattr(os, "RWF_APPEND"):
+    sys.exit("os.RWF_APPEND unavailable")
+os.pwritev(fd, [b"abc"], 0, os.RWF_APPEND)
+""", exactly("RWF_APPEND"))
+
+real("strace_fcntl_setfl_append", PRE + """
+import fcntl
+fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_APPEND)
+os.write(fd, b"abc")
+""", lambda w: None if any(x[:2] == WHOLE and "O_APPEND" in x[2] for x in w) else "got %r" % (w,))
 
 real("strace_mprotect_upgrading_a_readonly_shared_mapping", PRE + """
 import ctypes

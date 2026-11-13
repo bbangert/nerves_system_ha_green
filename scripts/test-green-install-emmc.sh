@@ -49,6 +49,25 @@ check_emmc_size_readable|s/sysfs_value "\$EMMC_SYSFS\/size" || return 1/sysfs_va
 check_loader_present|s/^check_loader_present() {/&\n    return 0/
 check_fw_platform|s/^check_fw_platform() {/&\n    return 0/
 check_emmc_unused|s/^check_emmc_unused() {/&\n    return 0/
+unused_emmc_numbers|s/^emmc_numbers() {/&\n    return 0/
+unused_disk_number|s/add_emmc_number "\$EMMC_SYSFS\/dev" || return 1/true/
+unused_partition_numbers|s/for f in "\$EMMC_SYSFS"\/\*\/dev; do/for f in; do/
+unused_number_readable|s/sysfs_value "\$1" \&\& is_devnum "\$SYSFS_VALUE" || return 1/sysfs_value "$1" || return 0/
+unused_number_format|s/sysfs_value "\$1" \&\& is_devnum "\$SYSFS_VALUE" || return 1/sysfs_value "$1" || return 1/
+mountinfo_check|s/^check_not_mounted() {/&\n    return 0/
+mountinfo_readable|s/\[ -r "\$MOUNTINFO" \] || { UNUSED_WHY="cannot read \$MOUNTINFO"; return 1; }/true/
+mountinfo_parse|s/is_devnum "\${3:-}" || { UNUSED_WHY="cannot parse a line of \$MOUNTINFO"; return 1; }/true/
+mountinfo_match|s/\*" \$3 "\*) UNUSED_WHY=/*" \$3 "x*) UNUSED_WHY=/
+mountinfo_nonempty|s/\[ "\$mi_lines" -gt 0 \] || {.*$/true/
+mountinfo_last_line|s/while IFS= read -r mi_line || \[ -n "\$mi_line" \]; do/while IFS= read -r mi_line; do/
+swap_check|s/^check_not_swapped() {/&\n    return 0/
+swaps_readable|s/\[ -r "\$SWAPS" \] || { UNUSED_WHY="cannot read \$SWAPS"; return 1; }/true/
+swap_identify|s/node_numbers "\${1:-}" || { UNUSED_WHY="cannot identify swap device .*$/node_numbers "${1:-}" || continue/
+swap_match|s/\*" \$NODE_NUMS "\*) UNUSED_WHY=/*" $NODE_NUMS "x*) UNUSED_WHY=/
+swap_hex_conversion|s/NODE_NUMS=\$((0x\${hex%%:\*})):\$((0x\${hex#\*:}))/NODE_NUMS=${hex}/
+holders_check|s/^check_no_holders() {/&\n    return 0/
+holders_disk|s/for h in "\$EMMC_SYSFS"\/holders\/\* "\$EMMC_SYSFS"\/\*\/holders\/\*; do/for h in "$EMMC_SYSFS"\/*\/holders\/*; do/
+holders_partitions|s/for h in "\$EMMC_SYSFS"\/holders\/\* "\$EMMC_SYSFS"\/\*\/holders\/\*; do/for h in "$EMMC_SYSFS"\/holders\/*; do/
 check_sd_has_fit|s/^check_sd_has_fit() {/&\n    return 0/
 check_gpt_rendered|s/^check_gpt_rendered() {/&\n    return 0/
 check_gpt_on_emmc|s/^check_gpt_on_emmc() {/&\n    return 0/
@@ -89,6 +108,7 @@ find_cmd() {
     return 1
 }
 DD_REAL=$(find_cmd dd) || { echo "no dd in PATH" >&2; exit 2; }
+STAT_REAL=$(find_cmd stat) || { echo "no stat in PATH" >&2; exit 2; }
 
 TRACE=
 if find_cmd strace >/dev/null && find_cmd python3 >/dev/null; then
@@ -185,7 +205,10 @@ EOF
 new_case() {
     NCASE=$((NCASE + 1))
     C=$ROOT/case$NCASE
-    mkdir -p "$C/sys/device" "$C/sys/queue"
+    mkdir -p "$C/sys/device" "$C/sys/queue" "$C/sys/mmcblk0p1" "$C/sys/mmcblk0p5" "$C/sys/mmcblk0p5/holders"
+    echo 179:0 > "$C/sys/dev"
+    echo 179:1 > "$C/sys/mmcblk0p1/dev"
+    echo 179:5 > "$C/sys/mmcblk0p5/dev"
     cp "$ROOT/sd.master" "$C/sd.img"
     cp "$ROOT/emmc.master" "$C/emmc.img"
     cp "$ROOT/emmc.master" "$C/emmc.orig"
@@ -204,8 +227,11 @@ new_case() {
     : > "$C/test.fw"
     : > "$C/fwup.calls"
     : > "$C/driver.extra"
-    printf '%s/sd.imgp5 /root ext4 rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n' "$C" > "$C/mounts"
+    # The SD card's partition and a tmpfs; the eMMC is 179:0 with 179:1 and 179:5.
+    printf '%s\n' "22 1 179:37 / /root rw,relatime - ext4 $C/sd.imgp5 rw" \
+        "23 22 0:21 / /tmp rw,nosuid - tmpfs tmpfs rw" > "$C/mountinfo"
     printf 'Filename Type Size Used Priority\n' > "$C/swaps"
+    : > "$C/nodes"
     LOADER_MAY_CHANGE=0
 }
 
@@ -216,13 +242,23 @@ ROOTDISK=$C/rootdisk0
 SD_DISK=$SD_PATH
 EMMC_DISK=$C/emmc.img
 EMMC_SYSFS=$C/sys
-MOUNTS=$C/mounts
+MOUNTINFO=$C/mountinfo
 SWAPS=$C/swaps
 TMPBASE=$C
 FWUP=$C/fwup
 MIN_EMMC_SECTORS=40000
 # Test files are not block devices.
 is_blockdev() { [ -f "\$1" ]; }
+# Files have no device numbers; \$C/nodes maps files, followed through
+# symlinks, to the hex major:minor stat would print for a device node.
+stat() {
+    if [ "\$1 \$2 \$3" = "-L -c %t:%T" ]; then
+        while read -r nf nh; do
+            [ "\$4" -ef "\$nf" ] && { echo "\$nh"; return 0; }
+        done < "$C/nodes"
+    fi
+    "$STAT_REAL" "\$@"
+}
 . "$C/driver.extra"
 main "\$@"
 EOF
@@ -477,14 +513,127 @@ begin platform_missing_in_meta
 expect_refusal "not a ha_green firmware"
 finish
 
+# A refusal from the in-use check must come before anything is rendered or
+# written, not just before the install.
+expect_unused_refusal() {
+    expect_refusal "$1"
+    ! grep -q -- '^-a' "$C/fwup.calls" || fail "fwup was applied"
+}
+
+# emmc_node <name> <hex major:minor>: a file standing in for a device node.
+emmc_node() {
+    : > "$C/$1"
+    echo "$C/$1 $2" >> "$C/nodes"
+}
+
 begin emmc_partition_mounted
-echo "$C/emmc.imgp1 /mnt vfat rw 0 0" >> "$C/mounts"
-expect_refusal "mounted or used as swap"
+echo "41 22 179:1 / /mnt rw - vfat $C/emmc.imgp1 rw" >> "$C/mountinfo"
+expect_unused_refusal "mounted (device 179:1 in"
+finish
+
+begin emmc_partition_mounted_under_another_name
+echo "41 22 179:5 / /mnt rw - ext4 /dev/disk/by-id/mmc-X-part5 rw" >> "$C/mountinfo"
+expect_unused_refusal "mounted (device 179:5 in"
+finish
+
+begin emmc_partition_bind_mounted
+echo "41 22 179:5 /sub /mnt rw - ext4 /dev/root rw" >> "$C/mountinfo"
+expect_unused_refusal "mounted (device 179:5 in"
+finish
+
+begin emmc_whole_disk_mounted
+echo "41 22 179:0 / /mnt rw - ext4 /dev/whatever rw" >> "$C/mountinfo"
+expect_unused_refusal "mounted (device 179:0 in"
+finish
+
+begin emmc_mounted_last_line_without_newline
+printf '41 22 179:5 / /mnt rw - ext4 x rw' >> "$C/mountinfo"
+expect_unused_refusal "mounted (device 179:5 in"
+finish
+
+begin mountinfo_unreadable
+rm "$C/mountinfo"
+expect_unused_refusal "cannot read"
+finish
+
+begin mountinfo_empty
+: > "$C/mountinfo"
+expect_unused_refusal "is empty"
+finish
+
+begin mountinfo_line_unparseable
+echo "garbage line here - x y" >> "$C/mountinfo"
+expect_unused_refusal "cannot parse a line"
+finish
+
+begin mountinfo_short_line
+echo "41 22" >> "$C/mountinfo"
+expect_unused_refusal "cannot parse a line"
+finish
+
+begin emmc_disk_number_unreadable
+rm "$C/sys/dev"
+expect_unused_refusal "cannot read the device numbers"
+finish
+
+begin emmc_partition_number_unreadable
+echo 179 > "$C/sys/mmcblk0p5/dev"
+expect_unused_refusal "cannot read the device numbers"
+finish
+
+begin emmc_partition_number_empty
+: > "$C/sys/mmcblk0p1/dev"
+expect_unused_refusal "cannot read the device numbers"
 finish
 
 begin emmc_used_as_swap
-echo "$C/emmc.imgp5 partition 1024 0 -2" >> "$C/swaps"
-expect_refusal "mounted or used as swap"
+emmc_node mmcblk0p5 b3:5
+echo "$C/mmcblk0p5 partition 1024 0 -2" >> "$C/swaps"
+expect_unused_refusal "used as swap ($C/mmcblk0p5)"
+finish
+
+begin emmc_used_as_swap_through_an_alias
+emmc_node node.p5 b3:5
+ln -s "$C/node.p5" "$C/by-id-swap"
+echo "$C/by-id-swap partition 1024 0 -2" >> "$C/swaps"
+expect_unused_refusal "used as swap ($C/by-id-swap)"
+finish
+
+begin emmc_disk_used_as_swap
+emmc_node node.disk b3:0
+echo "$C/node.disk partition 1024 0 -2" >> "$C/swaps"
+expect_unused_refusal "used as swap"
+finish
+
+begin swap_device_unidentifiable
+echo "$C/does-not-exist partition 1024 0 -2" >> "$C/swaps"
+expect_unused_refusal "cannot identify swap device"
+finish
+
+begin swaps_unreadable
+rm "$C/swaps"
+expect_unused_refusal "cannot read"
+finish
+
+begin emmc_partition_held_by_a_mapper
+: > "$C/sys/mmcblk0p5/holders/dm-0"
+expect_unused_refusal "held by dm-0"
+finish
+
+begin emmc_disk_held_by_a_mapper
+mkdir "$C/sys/holders"; : > "$C/sys/holders/md0"
+expect_unused_refusal "held by md0"
+finish
+
+begin unrelated_mounts_and_swap_do_not_refuse
+# Anonymous 0:N devices (btrfs, overlay), other disks, a swap on another disk
+# and a swap file.
+printf '%s\n' "41 22 0:44 / /data rw - btrfs /dev/x rw" "42 22 179:33 / /boot rw - vfat /dev/y rw" \
+    "43 22 8:1 / /mnt rw - ext4 /dev/sda1 rw" >> "$C/mountinfo"
+emmc_node node.sd b3:21
+emmc_node swapfile 0:0
+printf '%s\n' "$C/node.sd partition 1024 0 -2" "$C/swapfile file 1024 0 -3" >> "$C/swaps"
+expect_pass
 finish
 
 begin sd_has_no_fit

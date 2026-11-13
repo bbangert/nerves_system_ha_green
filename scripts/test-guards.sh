@@ -169,6 +169,14 @@ m_raw64() { subst "$T"/conf-mut 'raw_write(${ROOTFS_A_PART_OFFSET})' 'raw_write(
 m_memset() { subst "$T"/conf-mut 'raw_memset(${ROOTFS_B_PART_OFFSET}, 256, 0xff)' 'raw_memset(100, 8, 0xff)'; }
 m_trim() { subst "$T"/conf-mut 'trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})' 'trim(100, 8)'; }
 m_trim0() { subst "$T"/conf-mut 'trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})' 'trim(0, 256)'; }
+m_trim_window() { subst "$T"/conf-mut 'trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})' 'trim(16384, 16384)'; }
+m_trim_window_below() { subst "$T"/conf-mut 'trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})' 'trim(16000, 1000)'; }
+m_trim_window_above() { subst "$T"/conf-mut 'trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})' 'trim(32000, 1000)'; }
+m_trim_window_last() { subst "$T"/conf-mut 'trim(${ROOTFS_A_PART_OFFSET}, ${ROOTFS_A_PART_COUNT})' 'trim(32767, 1)'; }
+m_trim_window_complete() { subst "$T"/conf-mut '        gpt_write(gpt-sd)
+' '        gpt_write(gpt-sd)
+        trim(16384, 16384)
+'; }
 m_trim0_complete() { subst "$T"/conf-mut '        gpt_write(gpt-sd)
 ' '        gpt_write(gpt-sd)
         trim(0, 256)
@@ -201,6 +209,11 @@ loader_case "raw_memset over LBA 100" "inside the stock loader area" m_memset
 loader_case "trim over LBA 100" "trims fwup cache segment LBA 0-255" m_trim
 loader_case "trim(0, 256) in upgrade.a" "trims fwup cache segment LBA 0-255" m_trim0
 loader_case "trim(0, 256) in complete (SD-only)" "trims fwup cache segment LBA 0-255" m_trim0_complete
+loader_case "trim(16384, 16384) over the FIT window in upgrade.a" "which overlaps the FIT window 16384-32767" m_trim_window
+loader_case "trim(16000, 1000) reaching into the FIT window from below" "which overlaps the FIT window 16384-32767" m_trim_window_below
+loader_case "trim(32000, 1000) starting inside the FIT window" "which overlaps the FIT window 16384-32767" m_trim_window_above
+loader_case "trim(32767, 1) of the window's last sector" "which overlaps the FIT window 16384-32767" m_trim_window_last
+loader_case "trim(16384, 16384) in complete (SD-only)" "which overlaps the FIT window 16384-32767" m_trim_window_complete
 loader_case "gpt_write re-added to install.a" "install.a on-init gpt_write(gpt-emmc): dirties fwup cache segment LBA 0-255" m_gpt_install \
     "traced task install.a: pwrite64 of bytes 0..131071"
 loader_case "new task with a gpt_write, not on the SD-only list" "task repartition on-init gpt_write(gpt-sd): dirties fwup cache segment LBA 0-255" m_gpt_newtask

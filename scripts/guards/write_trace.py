@@ -38,6 +38,27 @@ def have_strace():
     return shutil.which("strace") is not None
 
 
+RWF_APPEND = 0x10
+
+
+def appends(rest):
+    """Whether a pwritev2's flags argument (the last one) contains RWF_APPEND.
+    Flags strace cannot name come out as numbers; those are checked by bit."""
+    m = re.search(r",\s*([A-Za-z0-9_|x]+)\)\s+=", rest)
+    if not m:
+        return True
+    for tok in m.group(1).split("|"):
+        if tok == "RWF_APPEND":
+            return True
+        if tok[:1].isdigit():
+            try:
+                if int(tok, 0) & RWF_APPEND:
+                    return True
+            except ValueError:
+                return True
+    return False
+
+
 class Desc:
     def __init__(self, path, pos=0):
         self.path = path
@@ -49,6 +70,7 @@ class Tracker:
         self.target = target
         self.tables = {}   # pid -> {fd: Desc}; threads share one table
         self.pending = {}  # pid -> (call, args)
+        self.issued = {}   # pid -> (Desc, position when the pending write started)
         self.writes = []   # (start, end_exclusive, what)
         # Once the target is mapped shared without PROT_WRITE, any later
         # writable mprotect might be upgrading that mapping; mprotect has no
@@ -72,6 +94,11 @@ class Tracker:
             if pid not in self.pending:
                 return
             call, args = self.pending.pop(pid)
+            snap = self.issued.pop(pid, None)
+            if snap and snap[0].pos != snap[1]:
+                # Something moved the shared position while the write was in
+                # flight, so where it landed is unknown.
+                snap[0].pos = None
             self.handle(pid, call, args + r.group(2))
             return
         c = CALL.match(rest)
@@ -80,12 +107,12 @@ class Tracker:
         call, args = c.group(1), c.group(2)
         if args.endswith("<unfinished ...>"):
             body = args[: -len("<unfinished ...>")]
-            # A write's offset is fixed when it is issued; account for it now
-            # so a later lseek on the same description cannot reorder it.
+            self.pending[pid] = (call, body)
             if call in ("write", "writev"):
-                self.handle(pid, call, body + ") = ?")
-            else:
-                self.pending[pid] = (call, body)
+                fd, _ = self.fdarg(body)
+                desc = self.table(pid).get(fd)
+                if desc is not None:
+                    self.issued[pid] = (desc, desc.pos)
             return
         self.handle(pid, call, args)
 
@@ -96,6 +123,7 @@ class Tracker:
             if self.target in args:
                 self.hit(*WHOLE, "%s unfinished" % call)
         self.pending.clear()
+        self.issued.clear()
 
     def ret(self, args):
         m = RET.search(args)
@@ -199,21 +227,39 @@ class Tracker:
             return
 
         rest = args[FD.match(args).end():]
+
+        # Switching an open descriptor to O_APPEND moves every later write to
+        # EOF, wherever the tracked position says.
+        if call == "fcntl":
+            if "F_SETFL" in args and "O_APPEND" in args and (rv is None or rv >= 0):
+                self.hit(*WHOLE, "fcntl F_SETFL O_APPEND")
+                desc.pos = None
+            return
+
         if call in ("write", "pwrite64"):
+            # The requested count is only an upper bound: a short write moves
+            # the position, and lands, by what the call returned.
+            if rv is not None and rv < 0:
+                return
             m = re.match(r',\s*""(?:\.\.\.)?,\s*(\d+)(?:,\s*(\d+))?', rest)
             if not m or (call == "pwrite64") != (m.group(2) is not None):
                 self.hit(*WHOLE, "%s not parsed" % call)
                 desc.pos = None
                 return
-            n = int(m.group(1))
+            if rv is None:
+                self.hit(*WHOLE, "%s result unknown" % call)
+                desc.pos = None
+                return
             if call == "pwrite64":
-                off = int(m.group(2))
-                self.hit(off, off + n, call)
+                if rv:
+                    off = int(m.group(2))
+                    self.hit(off, off + rv, call)
             elif desc.pos is None:
                 self.hit(*WHOLE, "write at an unknown offset")
             else:
-                self.hit(desc.pos, desc.pos + n, call)
-                desc.pos += n
+                if rv:
+                    self.hit(desc.pos, desc.pos + rv, call)
+                desc.pos += rv
             return
 
         if call in ("writev", "pwritev", "pwritev2"):
@@ -223,6 +269,10 @@ class Tracker:
             tail = re.search(r"\],\s*\d+(?:,\s*(\d+))?", rest)
             if rv is None or not tail or (call != "writev") != (tail.group(1) is not None):
                 self.hit(*WHOLE, "%s not parsed" % call)
+                desc.pos = None
+            elif call == "pwritev2" and appends(rest):
+                # RWF_APPEND writes at EOF whatever the offset argument says.
+                self.hit(*WHOLE, "pwritev2 RWF_APPEND")
                 desc.pos = None
             elif call != "writev":
                 off = int(tail.group(1))

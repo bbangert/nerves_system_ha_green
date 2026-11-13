@@ -20,7 +20,7 @@ ROOTDISK=/dev/rootdisk0
 SD_DISK=/dev/mmcblk1
 EMMC_DISK=/dev/mmcblk0
 EMMC_SYSFS=/sys/block/mmcblk0
-MOUNTS=/proc/mounts
+MOUNTINFO=/proc/self/mountinfo
 SWAPS=/proc/swaps
 TMPBASE=/tmp
 FWUP=fwup
@@ -167,16 +167,96 @@ check_fw_platform() {
         sed -n 's/^meta-platform="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p')" = "$PLATFORM" ]
 }
 
-# fwup's own require-unmounted-destination does not see swap.
-check_emmc_unused() {
-    while read -r dev _; do
-        case $dev in "$EMMC_DISK"*) return 1 ;; esac
-    done < "$MOUNTS"
-    [ -r "$SWAPS" ] || return 0
-    while read -r dev _; do
-        case $dev in "$EMMC_DISK"*) return 1 ;; esac
+# Users of the eMMC are matched by major:minor, the kernel's own identity for
+# a block device: by-id links and extra device nodes make names useless. A
+# filesystem spanning several devices (btrfs) shows only an anonymous 0:N in
+# mountinfo, so one on the eMMC would not be seen.
+is_devnum() {
+    case $1 in
+        ""|*[!0-9:]*|:*|*:|*:*:*) return 1 ;;
+        *:*) return 0 ;;
+    esac
+    return 1
+}
+
+add_emmc_number() {
+    sysfs_value "$1" && is_devnum "$SYSFS_VALUE" || return 1
+    EMMC_NUMS="$EMMC_NUMS$SYSFS_VALUE "
+}
+
+# The disk and every partition sysfs lists under it.
+emmc_numbers() {
+    EMMC_NUMS=" "
+    add_emmc_number "$EMMC_SYSFS/dev" || return 1
+    for f in "$EMMC_SYSFS"/*/dev; do
+        [ -e "$f" ] || continue
+        add_emmc_number "$f" || return 1
+    done
+}
+
+# node_numbers <path>: NODE_NUMS as decimal major:minor, to compare with
+# sysfs. stat prints hex.
+node_numbers() {
+    [ -n "$1" ] || return 1
+    hex=$(stat -L -c '%t:%T' "$1" 2>/dev/null) || return 1
+    case $hex in
+        *[!0-9a-fA-F:]*|:*|*:|*:*:*|"") return 1 ;;
+        *:*) ;;
+        *) return 1 ;;
+    esac
+    NODE_NUMS=$((0x${hex%%:*})):$((0x${hex#*:}))
+}
+
+# The first three mountinfo fields are ids and the device's major:minor.
+check_not_mounted() {
+    [ -r "$MOUNTINFO" ] || { UNUSED_WHY="cannot read $MOUNTINFO"; return 1; }
+    mi_lines=0
+    while IFS= read -r mi_line || [ -n "$mi_line" ]; do
+        set -f
+        # shellcheck disable=SC2086 # splitting is the point; globbing is off
+        set -- $mi_line
+        set +f
+        mi_lines=$((mi_lines + 1))
+        is_devnum "${3:-}" || { UNUSED_WHY="cannot parse a line of $MOUNTINFO"; return 1; }
+        case $EMMC_NUMS in
+            *" $3 "*) UNUSED_WHY="$EMMC_DISK or a partition of it is mounted (device $3 in $MOUNTINFO)"; return 1 ;;
+        esac
+    done < "$MOUNTINFO"
+    # Something is always mounted; an empty table means the read went wrong.
+    [ "$mi_lines" -gt 0 ] || { UNUSED_WHY="$MOUNTINFO is empty"; return 1; }
+}
+
+# fwup's own require-unmounted-destination does not see swap. A swap file is
+# covered by the mount of its filesystem; stat gives it 0:0.
+check_not_swapped() {
+    [ -r "$SWAPS" ] || { UNUSED_WHY="cannot read $SWAPS"; return 1; }
+    while IFS= read -r sw_line || [ -n "$sw_line" ]; do
+        set -f
+        # shellcheck disable=SC2086 # splitting is the point; globbing is off
+        set -- $sw_line
+        set +f
+        [ "${1:-}" = Filename ] && continue
+        node_numbers "${1:-}" || { UNUSED_WHY="cannot identify swap device '${1:-}' in $SWAPS"; return 1; }
+        case $EMMC_NUMS in
+            *" $NODE_NUMS "*) UNUSED_WHY="$EMMC_DISK or a partition of it is used as swap ($1)"; return 1 ;;
+        esac
     done < "$SWAPS"
-    return 0
+}
+
+# Device-mapper, md and the like sit on the eMMC without a mount of it.
+check_no_holders() {
+    for h in "$EMMC_SYSFS"/holders/* "$EMMC_SYSFS"/*/holders/*; do
+        if [ -e "$h" ] || [ -L "$h" ]; then
+            UNUSED_WHY="$EMMC_DISK or a partition of it is held by ${h##*/}"
+            return 1
+        fi
+    done
+}
+
+check_emmc_unused() {
+    emmc_numbers ||
+        { UNUSED_WHY="cannot read the device numbers of $EMMC_DISK from $EMMC_SYSFS"; return 1; }
+    check_not_mounted && check_not_swapped && check_no_holders
 }
 
 # The SD's FIT is the comparison baseline; without FDT magic there is none.
@@ -224,7 +304,7 @@ main() {
     check_emmc_size || refuse "$EMMC_DISK size is unreadable or below $MIN_EMMC_SECTORS sectors"
     check_loader_present || refuse "no RKNS stock loader at $EMMC_DISK LBA $LOADER_LBA"
     check_fw_platform || refuse "$FW is not a $PLATFORM firmware"
-    check_emmc_unused || refuse "a partition of $EMMC_DISK is mounted or used as swap"
+    check_emmc_unused || refuse "$UNUSED_WHY"
     check_sd_has_fit || refuse "no FIT at $SD_DISK LBA $FIT_LBA to compare against"
 
     hash_range "$EMMC_DISK" "$LOADER_LBA" "$LOADER_COUNT" ||
