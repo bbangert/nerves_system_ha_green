@@ -31,8 +31,14 @@ fwup_define() {
 
 # The one value the script uses for a pattern: sed expression with one group,
 # run over uboot.env. Fails if the pattern is gone or its uses disagree.
+# Third argument "stmts": split into one statement per line first, so a line
+# holding several matches is checked in full.
 script_value() {
-    vals=$(sed -n "$2" "$UBOOT_ENV" | sort -u)
+    if [ "${3:-}" = stmts ]; then
+        vals=$(sed 's/ *&& */\n/g; s/; */\n/g' "$UBOOT_ENV" | sed -n "$2" | sort -u)
+    else
+        vals=$(sed -n "$2" "$UBOOT_ENV" | sort -u)
+    fi
     [ -n "$vals" ] || fail "$1: pattern not found in $UBOOT_ENV (the script changed shape; update this check)"
     [ "$(echo "$vals" | wc -l)" -eq 1 ] || fail "$1: $UBOOT_ENV uses several values: $(echo "$vals" | tr '\n' ' ')"
     echo "$vals"
@@ -59,8 +65,9 @@ dec() {
 
 # --- state block: location
 
-read_args=$(script_value "state read" 's/.*mmc read [$]{nerves_state_addr} \(0x[0-9a-fA-F]*\) \(0x[0-9a-fA-F]*\).*/\1 \2/p')
-write_args=$(script_value "state write" 's/.*mmc write [$]{nerves_state_addr} \(0x[0-9a-fA-F]*\) \(0x[0-9a-fA-F]*\).*/\1 \2/p')
+# The 0x count operand tells the state block from the 1-block FIT probe, whatever the address.
+read_args=$(script_value "state read" 's/.*mmc read [^ ]* \(0x[0-9a-fA-F]*\) \(0x[0-9a-fA-F]*\).*/\1 \2/p' stmts)
+write_args=$(script_value "state write" 's/.*mmc write [^ ]* \(0x[0-9a-fA-F]*\) \(0x[0-9a-fA-F]*\).*/\1 \2/p' stmts)
 [ "$read_args" = "$write_args" ] || fail "boot script reads the state with '$read_args' but writes it with '$write_args'"
 # shellcheck disable=SC2086 # two fields
 set -- $read_args
@@ -84,9 +91,10 @@ fw_env_size=$(dec "fw_env.config size" "$3")
 
 # --- state block: size (U-Boot and fwup both CRC size - 4 bytes)
 
-import_size=$(dec "script env import size" "$(script_value "env import" 's/.*env import -c [$]{nerves_state_addr} \(0x[0-9a-fA-F]*\).*/\1/p')")
-export_size=$(dec "script env export size" "$(script_value "env export" 's/.*env export -c -s \(0x[0-9a-fA-F]*\) [$]{nerves_state_addr}.*/\1/p')")
-clear_size=$(dec "script buffer clear size" "$(script_value "buffer clear" 's/.*mw\.b [$]{nerves_state_addr} 0 \(0x[0-9a-fA-F]*\).*/\1/p')")
+# -c imports/exports are the state block; -t ones (the crumb) have no size operand here.
+import_size=$(dec "script env import size" "$(script_value "env import" 's/.*env import -c [^ ]* \(0x[0-9a-fA-F]*\).*/\1/p' stmts)")
+export_size=$(dec "script env export size" "$(script_value "env export" 's/.*env export -c -s \(0x[0-9a-fA-F]*\) .*/\1/p' stmts)")
+clear_size=$(dec "script buffer clear size" "$(script_value "buffer clear" 's/.*mw\.b [^ ]* 0 \(0x[0-9a-fA-F]*\).*/\1/p' stmts)")
 frag_size=$(dec "CONFIG_ENV_SIZE" "$(sed -n 's/^CONFIG_ENV_SIZE=\(.*\)$/\1/p' "$FRAGMENT")")
 image_size=$(dec "ENVIMAGE_SIZE" "$(sed -n 's/^BR2_PACKAGE_HOST_UBOOT_TOOLS_ENVIMAGE_SIZE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$DEFCONFIG")")
 
