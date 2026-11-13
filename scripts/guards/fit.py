@@ -3,9 +3,11 @@
 The FIT is a flattened device tree with external data, parsed here with the
 stdlib so no dtc is needed at build time. Why each rule exists: the stock SPL
 only decompresses gzip (and only if built with it), silently jumps into
-garbage on any other compression, and rejects unknown hash algorithms.
+garbage on any other compression, rejects unknown hash algorithms, and
+rejects an image whose payload does not hash to the recorded sha256.
 """
 
+import hashlib
 import re
 import struct
 import sys
@@ -121,18 +123,69 @@ def read_contract(path):
         return [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
 
 
-def extent(root, hdr_total):
-    end = hdr_total
+def payloads(root, hdr_total, errs):
     base = (hdr_total + 3) & ~3
+    out = []
     for i in images_of(root):
-        size = i.cell("data-size")
-        if size is None:
+        # Embedded data would share the SPL's 1 MiB malloc pool with the FIT
+        # header; the stock FIT is external throughout.
+        if "data" in i.props:
+            errs.append("image %s: embedded data property; payloads must be external (data-size + data-offset)" % i.name)
             continue
-        if "data-offset" in i.props:
-            end = max(end, base + i.cell("data-offset") + size)
-        elif "data-position" in i.props:
-            end = max(end, i.cell("data-position") + size)
-    return end
+        size, off, pos = i.cell("data-size"), i.cell("data-offset"), i.cell("data-position")
+        if size is None:
+            errs.append("image %s: no data-size, so no payload" % i.name)
+        elif size == 0:
+            errs.append("image %s: data-size is 0, empty payload" % i.name)
+        if off is None and pos is None:
+            errs.append("image %s: neither data-offset nor data-position, no payload location" % i.name)
+        elif off is not None and pos is not None:
+            errs.append("image %s: both data-offset and data-position (ambiguous)" % i.name)
+        if not size or (off is None) == (pos is None):
+            continue
+        start = base + off if off is not None else pos
+        if start < base:
+            errs.append("image %s: payload starts at byte %d, inside the FDT header (ends at %d)" % (i.name, start, base))
+            continue
+        out.append((i.name, start, start + size))
+    return out
+
+
+def check_payloads(root, hdr_total, data, errs):
+    spans = payloads(root, hdr_total, errs)
+    for name, start, end in spans:
+        if end > len(data):
+            errs.append("image %s: payload %d-%d extends past the end of the file (%d bytes)" % (name, start, end, len(data)))
+    for n, (a, s0, e0) in enumerate(spans):
+        for b, s1, e1 in spans[n + 1:]:
+            if s0 < e1 and s1 < e0:
+                errs.append("images %s and %s: payloads overlap (%d-%d and %d-%d)" % (a, b, s0, e0, s1, e1))
+    by_name = {i.name: i for i in images_of(root)}
+    for name, start, end in spans:
+        if end > len(data):
+            continue
+        digest = hashlib.sha256(data[start:end]).digest()
+        for h in by_name[name].children:
+            if not h.name.startswith("hash") or h.string("algo") != "sha256":
+                continue
+            value = h.props.get("value")
+            if value is None or len(value) != 32:
+                errs.append("image %s: %s has no 32-byte value (the SPL checks it)" % (name, h.name))
+            elif value != digest:
+                errs.append("image %s: %s value does not match the sha256 of its payload (the SPL would reject the FIT)" % (name, h.name))
+    return max([hdr_total] + [e for _, _, e in spans])
+
+
+def check_references(root, dconf, errs):
+    present = {i.name for i in images_of(root)}
+    named = set()
+    for key in ("firmware", "loadables", "fdt"):
+        for n in dconf.strings(key) or []:
+            named.add(n)
+            if n not in present:
+                errs.append("default configuration %s: %s names image %s, which is not under /images" % (dconf.name, key, n))
+    for n in sorted(present - named):
+        errs.append("image %s: not referenced by default configuration %s" % (n, dconf.name))
 
 
 def kconfig(text):
@@ -183,7 +236,9 @@ def check(itb_path, contract_path, config_path):
             if h.string("algo") != "sha256":
                 errs.append("image %s: %s algo is %r, must be sha256" % (i.name, h.name, h.string("algo")))
 
-    ext = extent(root, total)
+    ext = check_payloads(root, total, data, errs)
+    if dconf is not None:
+        check_references(root, dconf, errs)
     if ext > len(data):
         errs.append("external data ends at byte %d but the file is %d bytes (truncated)" % (ext, len(data)))
     if max(ext, len(data)) > WINDOW_BYTES:

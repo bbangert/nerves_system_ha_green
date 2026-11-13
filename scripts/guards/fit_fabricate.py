@@ -79,8 +79,13 @@ def main(argv):
     if mut == "default-missing":
         default = "nope"
 
+    if mut == "dangling-ref":
+        images.pop("atf-6")
+    if mut == "extra-image":
+        images["atf-7"] = dict(images["atf-6"])
+
     datas, img_nodes = [], []
-    pos = 0
+    pos = prev_pos = 0
     for name, p in sorted(images.items()):
         data = bytes(64)
         if name == "u-boot":
@@ -102,12 +107,32 @@ def main(argv):
                 if mut == "load" and name == "u-boot" and k == "load":
                     v += 0x1000
                 props.append((k, cells(v)))
-        props += [("data-size", cells(len(data))), ("data-offset", cells(pos))]
-        hashnode = {"props": [("algo", strs("md5" if mut == "md5" and name == "atf-1" else "sha256")),
-                              ("value", hashlib.sha256(data).digest())], "children": []}
+        off = pos
+        if mut == "overlap" and name == "atf-3":
+            off = prev_pos + 16
+        first = name == "atf-1"
+        if not (mut in ("no-size", "no-payload") and first):
+            props.append(("data-size", cells(0 if mut == "zero-size" and first else len(data))))
+        if mut == "into-header" and name == "atf-2":
+            props.append(("data-position", cells(8)))
+        elif not (mut in ("no-offset", "no-payload") and first):
+            props.append(("data-offset", cells(off)))
+        if mut == "both-offsets" and first:
+            props.append(("data-position", cells(0x1000)))
+        if mut == "embedded" and first:
+            props = [kv for kv in props if not kv[0].startswith("data-")]
+            props.append(("data", data))
+        hval = hashlib.sha256(data).digest()
+        hprops = [("algo", strs("md5" if mut == "md5" and name == "atf-1" else "sha256")), ("value", hval)]
+        if mut == "no-hash-value" and name == "atf-1":
+            hprops = hprops[:1]
+        if mut == "short-hash-value" and name == "atf-1":
+            hprops[1] = ("value", hval[:16])
+        hashnode = {"props": hprops, "children": []}
         children = [] if mut == "nohash" and name == "atf-2" else [("hash", hashnode)]
         img_nodes.append((name, {"props": props, "children": children}))
         datas.append(data)
+        prev_pos = pos
         pos += (len(data) + 3) & ~3
 
     conf_nodes = []
@@ -125,6 +150,8 @@ def main(argv):
     body = b"".join(((d + b"\0" * (-len(d) % 4)) for d in datas))
     if mut == "truncated":
         body = body[:-32]
+    if mut == "bad-hash":
+        body = bytes([body[0] ^ 1]) + body[1:]
     with open(out_path, "wb") as f:
         f.write(blob + body)
 
