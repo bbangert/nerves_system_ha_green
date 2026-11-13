@@ -13,7 +13,7 @@ BOARD_DIR=$(cd "$(dirname "$0")" && pwd)
 # NOTE: revert.fw is the previous, more limited version of this. ops.fw is
 #       backwards compatible.
 mkdir -p "$TARGET_DIR"/usr/share/fwup
-NERVES_DEFCONFIG_DIR="$BOARD_DIR" "$HOST_DIR"/usr/bin/fwup -c -f "$BOARD_DIR"/fwup-ops.conf -o "$TARGET_DIR"/usr/share/fwup/ops.fw
+"$HOST_DIR"/usr/bin/fwup -c -f "$BOARD_DIR"/fwup-ops.conf -o "$TARGET_DIR"/usr/share/fwup/ops.fw
 ln -sf ops.fw "$TARGET_DIR"/usr/share/fwup/revert.fw
 
 # Copy the fwup includes to the images dir

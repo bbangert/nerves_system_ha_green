@@ -1,0 +1,191 @@
+#!/bin/sh
+#
+# Usage: green-install-emmc <path-to.fw>
+#
+# The only supported way to write the eMMC. The unit's stock first-stage
+# loader lives in eMMC LBA 64-16383 and we have no way to restore it, so this
+# refuses unless every precondition holds, and proves afterwards that the
+# loader area is byte-identical and that our FIT landed.
+#
+# Device paths and the fwup command are plain variables below, and main only
+# runs when the file is executed under its own name. The test harness sources
+# the file and reassigns them; nothing in the environment can redirect it.
+
+ROOTDISK=/dev/rootdisk0
+SD_DISK=/dev/mmcblk1
+EMMC_DISK=/dev/mmcblk0
+EMMC_SYSFS=/sys/block/mmcblk0
+MOUNTS=/proc/mounts
+SWAPS=/proc/swaps
+TMPBASE=/tmp
+FWUP=fwup
+PLATFORM=ha_green
+
+# LBA 64 holds the stock loader's RKNS header; LBA 16384-32767 is the window
+# the stock SPL loads our FIT from.
+LOADER_LBA=64
+LOADER_COUNT=16320
+FIT_LBA=16384
+FIT_COUNT=16384
+
+refuse() {
+    echo "green-install-emmc: REFUSED: $1; nothing was written to the eMMC." >&2
+    exit 1
+}
+
+is_blockdev() {
+    [ -b "$1" ]
+}
+
+# -ef follows symlinks, so rootdisk0 -> mmcblk1 matches; the major:minor
+# fallback covers a rootdisk0 that is its own device node.
+same_dev() {
+    [ "$1" -ef "$2" ] && return 0
+    [ -b "$1" ] && [ -b "$2" ] || return 1
+    [ "$(stat -L -c '%t:%T' "$1")" = "$(stat -L -c '%t:%T' "$2")" ]
+}
+
+# A short read must not look like a stable hash, so the dd record count is
+# checked as well; sh has no pipefail.
+hash_range() {
+    H=$(dd if="$1" bs=512 skip="$2" count="$3" 2>"$TMPD/dd.err" | sha256sum)
+    H=${H%% *}
+    grep -q "^$3+0 records in" "$TMPD/dd.err" && [ "${#H}" -eq 64 ]
+}
+
+sysfs_value() {
+    [ -r "$1" ] || return 1
+    read -r SYSFS_VALUE < "$1"
+    [ -n "$SYSFS_VALUE" ]
+}
+
+check_sd_booted() {
+    [ -e "$ROOTDISK" ] && same_dev "$ROOTDISK" "$SD_DISK"
+}
+
+check_emmc_present() {
+    is_blockdev "$EMMC_DISK"
+}
+
+check_emmc_nonremovable() {
+    sysfs_value "$EMMC_SYSFS/removable" && [ "$SYSFS_VALUE" = 0 ]
+}
+
+check_emmc_is_mmc() {
+    sysfs_value "$EMMC_SYSFS/device/type" && [ "$SYSFS_VALUE" = MMC ]
+}
+
+check_emmc_not_boot_disk() {
+    ! same_dev "$ROOTDISK" "$EMMC_DISK"
+}
+
+# We never write a loader, so an eMMC without one could not boot afterwards.
+check_loader_present() {
+    # The group keeps a shell's "ignored null byte" warning off stderr.
+    { magic=$(dd if="$EMMC_DISK" bs=4 skip=$((LOADER_LBA * 512 / 4)) count=1 2>/dev/null); } 2>/dev/null
+    [ "$magic" = RKNS ]
+}
+
+check_fw_platform() {
+    [ "$("$FWUP" -m -i "$FW" 2>/dev/null |
+        sed -n 's/^meta-platform="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p')" = "$PLATFORM" ]
+}
+
+# fwup's own require-unmounted-destination does not see swap.
+check_emmc_unused() {
+    while read -r dev _; do
+        case $dev in "$EMMC_DISK"*) return 1 ;; esac
+    done < "$MOUNTS"
+    [ -r "$SWAPS" ] || return 0
+    while read -r dev _; do
+        case $dev in "$EMMC_DISK"*) return 1 ;; esac
+    done < "$SWAPS"
+    return 0
+}
+
+# The SD's FIT is the comparison baseline; without FDT magic there is none.
+check_sd_has_fit() {
+    magic=$(dd if="$SD_DISK" bs=4 skip=$((FIT_LBA * 512 / 4)) count=1 2>/dev/null | sha256sum)
+    want=$(printf '\320\015\376\355' | sha256sum)
+    [ "$magic" = "$want" ]
+}
+
+main() {
+    [ $# -eq 1 ] || {
+        echo "usage: green-install-emmc <path-to.fw>" >&2
+        exit 2
+    }
+    FW=$1
+    [ -f "$FW" ] || refuse "firmware file $FW not found"
+
+    TMPD=$TMPBASE/green-install-emmc.$$
+    mkdir "$TMPD" || refuse "cannot create $TMPD"
+    trap 'rm -rf "$TMPD"' EXIT
+
+    check_sd_booted || refuse "$ROOTDISK is not $SD_DISK (not running from the SD card)"
+    check_emmc_present || refuse "$EMMC_DISK is not a block device"
+    check_emmc_nonremovable || refuse "$EMMC_DISK is not a non-removable device"
+    check_emmc_is_mmc || refuse "$EMMC_DISK is not an MMC device"
+    check_emmc_not_boot_disk || refuse "$EMMC_DISK is the boot disk"
+    check_loader_present || refuse "no RKNS stock loader at $EMMC_DISK LBA $LOADER_LBA"
+    check_fw_platform || refuse "$FW is not a $PLATFORM firmware"
+    check_emmc_unused || refuse "a partition of $EMMC_DISK is mounted or used as swap"
+    check_sd_has_fit || refuse "no FIT at $SD_DISK LBA $FIT_LBA to compare against"
+
+    hash_range "$EMMC_DISK" "$LOADER_LBA" "$LOADER_COUNT" ||
+        refuse "cannot read the loader area of $EMMC_DISK"
+    loader_before=$H
+    hash_range "$SD_DISK" "$FIT_LBA" "$FIT_COUNT" ||
+        refuse "cannot read the FIT window of $SD_DISK"
+    fit_sd=$H
+
+    echo "eMMC loader area (LBA $LOADER_LBA-$((LOADER_LBA + LOADER_COUNT - 1))) sha256 before: $loader_before"
+    "$FWUP" -a -d "$EMMC_DISK" -t install -i "$FW"
+    fwup_rc=$?
+
+    status=0
+    if ! hash_range "$EMMC_DISK" "$LOADER_LBA" "$LOADER_COUNT"; then
+        echo "FAIL: cannot read the loader area back" >&2
+        loader_after=unreadable
+        status=1
+    else
+        loader_after=$H
+    fi
+    echo "eMMC loader area (LBA $LOADER_LBA-$((LOADER_LBA + LOADER_COUNT - 1))) sha256 after:  $loader_after"
+    if [ "$loader_before" = "$loader_after" ]; then
+        echo "loader area: unchanged"
+    else
+        echo "FAIL: the loader area changed" >&2
+        status=1
+    fi
+
+    if hash_range "$EMMC_DISK" "$FIT_LBA" "$FIT_COUNT"; then
+        fit_emmc=$H
+    else
+        fit_emmc=unreadable
+    fi
+    echo "FIT window (LBA $FIT_LBA-$((FIT_LBA + FIT_COUNT - 1))) sha256 SD:   $fit_sd"
+    echo "FIT window (LBA $FIT_LBA-$((FIT_LBA + FIT_COUNT - 1))) sha256 eMMC: $fit_emmc"
+    if [ "$fit_sd" = "$fit_emmc" ]; then
+        echo "FIT window: identical"
+    else
+        echo "FAIL: the eMMC FIT differs from the SD's (or was not written)" >&2
+        status=1
+    fi
+
+    if [ "$fwup_rc" -ne 0 ]; then
+        echo "FAIL: fwup exited with status $fwup_rc" >&2
+        status=1
+    fi
+
+    if [ "$status" -eq 0 ]; then
+        echo "PASS"
+    else
+        echo "FAIL: do not reboot into the eMMC; no repair was attempted"
+    fi
+    exit "$status"
+}
+
+case ${0##*/} in
+    green-install-emmc) main "$@" ;;
+esac
