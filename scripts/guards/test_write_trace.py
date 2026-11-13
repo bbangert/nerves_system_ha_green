@@ -337,6 +337,164 @@ def pwritev2_rwf_append_on_other_file_is_ignored():
     return expect_none(trace("100 pwritev2(%s, [...], 1, 0, RWF_APPEND) = 3" % OTH))
 
 
+def got_ranges(*lines):
+    got = trace(*lines)
+    return None if got == [(4096, 4097, "write")] else "got %r" % (got,)
+
+
+W1 = "100 write(%s, \"\"..., 1) = 1" % TGT
+
+
+@case
+def read_advances_the_position():
+    return got_ranges(OPEN, "100 read(%s, \"\"..., 4096) = 4096" % TGT, W1)
+
+
+@case
+def short_read_advances_by_the_return_value():
+    return got_ranges(OPEN, "100 read(%s, \"\"..., 8192) = 4096" % TGT, W1)
+
+
+@case
+def failed_read_keeps_the_position():
+    got = trace(OPEN, "100 read(%s, 0x7ffd1000, 4096) = -1 EIO (Input/output error)" % TGT, W1)
+    return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+
+@case
+def read_at_eof_keeps_the_position():
+    return got_ranges(OPEN, "100 read(%s, \"\"..., 4096) = 4096" % TGT,
+                      "100 read(%s, \"\"..., 4096) = 0" % TGT, W1)
+
+
+@case
+def read_unfinished_resumed_uses_the_return_value():
+    return got_ranges(OPEN, "100 read(%s, \"\"..., 8192 <unfinished ...>" % TGT,
+                      "101 write(1</dev/null>, \"\"..., 1) = 1",
+                      "100 <... read resumed>) = 4096", W1)
+
+
+@case
+def read_unfinished_with_a_seek_meanwhile_is_whole_file():
+    return expect_hit(trace(OPEN, "100 clone(child_stack=NULL, flags=CLONE_VM|CLONE_FILES) = 101",
+                            "100 read(%s, \"\"..., 100 <unfinished ...>" % TGT,
+                            "101 lseek(%s, 4096, SEEK_SET) = 4096" % TGT,
+                            "100 <... read resumed>) = 100", W1), "unknown offset")
+
+
+@case
+def read_result_unknown_makes_the_next_write_whole_file():
+    return expect_hit(trace(OPEN, "100 read(%s, \"\"..., 4096) = ?" % TGT, W1), "unknown offset")
+
+
+@case
+def read_after_lseek():
+    return got_ranges(OPEN, "100 lseek(%s, 1000, SEEK_SET) = 1000" % TGT,
+                      "100 read(%s, \"\"..., 3096) = 3096" % TGT, W1)
+
+
+@case
+def read_on_a_dup_advances_the_shared_position():
+    return got_ranges(OPEN, "100 dup(%s) = 5<%s>" % (TGT, T), "100 read(5<%s>, \"\"..., 4096) = 4096" % T, W1)
+
+
+@case
+def read_in_a_forked_child_advances_the_shared_position():
+    return got_ranges(OPEN, "100 clone(child_stack=NULL, flags=SIGCHLD) = 101",
+                      "101 read(%s, \"\"..., 4096) = 4096" % TGT, W1)
+
+
+@case
+def read_on_another_file_is_ignored():
+    got = trace(OPEN, "100 read(%s, \"\"..., 4096) = 4096" % SRC, W1)
+    return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+
+@case
+def readv_advances_the_position():
+    return got_ranges(OPEN, "100 readv(%s, [{iov_base=\"\"..., iov_len=4096}], 1) = 4096" % TGT, W1)
+
+
+@case
+def readv_failed_keeps_the_position():
+    got = trace(OPEN, "100 readv(%s, 0x7ffd1000, 1) = -1 EIO (Input/output error)" % TGT, W1)
+    return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+
+@case
+def pread64_does_not_move_the_position():
+    got = trace(OPEN, "100 pread64(%s, \"\"..., 4096, 100) = 4096" % TGT, W1)
+    return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+
+@case
+def preadv_does_not_move_the_position():
+    got = trace(OPEN, "100 preadv(%s, [{iov_base=\"\"..., iov_len=4096}], 1, 100) = 4096" % TGT, W1)
+    return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+
+def preadv2(off, ret="4096"):
+    return "100 preadv2(%s, [{iov_base=\"\"..., iov_len=4096}], 1, %s, 0) = %s" % (TGT, off, ret)
+
+
+@case
+def preadv2_at_current_position_advances():
+    return got_ranges(OPEN, preadv2("-1"), W1)
+
+
+@case
+def preadv2_with_an_offset_does_not_move_the_position():
+    got = trace(OPEN, preadv2("100"), W1)
+    return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+
+@case
+def preadv2_unparseable_loses_the_position():
+    return expect_hit(trace(OPEN, "100 preadv2(%s, ???) = 4096" % TGT, W1), "unknown offset")
+
+
+@case
+def sendfile_from_target_with_null_offset_loses_the_position():
+    return expect_hit(trace(OPEN, "100 sendfile(5<socket:[1]>, %s, NULL, 10) = 10" % TGT, W1), "unknown offset")
+
+
+@case
+def sendfile_from_target_with_an_offset_pointer_keeps_the_position():
+    got = trace(OPEN, "100 sendfile(5<socket:[1]>, %s, [0] => [10], 10) = 10" % TGT, W1)
+    return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+
+@case
+def sendfile_from_target_failed_keeps_the_position():
+    got = trace(OPEN, "100 sendfile(5<socket:[1]>, %s, NULL, 10) = -1 EINVAL (Invalid argument)" % TGT, W1)
+    return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+
+@case
+def sendfile_unparseable_mentioning_target_loses_the_position():
+    return expect_hit(trace(OPEN, "100 sendfile(5<socket:[1]>, %s ???) = 10" % TGT, W1), "unknown offset")
+
+
+for _call in ("copy_file_range", "splice"):
+    def _mk_src(call):
+        def src_target_null_offset_loses_the_position():
+            return expect_hit(trace(OPEN, copy(call, TGT, "4</img/out.bin>"), W1), "unknown offset")
+
+        def src_target_with_an_offset_keeps_the_position():
+            got = trace(OPEN, copy(call, TGT, "4</img/out.bin>", offs=("[0] => [4096]", "NULL")), W1)
+            return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+        def src_target_failed_keeps_the_position():
+            got = trace(OPEN, copy(call, TGT, "4</img/out.bin>", ret="-1 EBADF (Bad file descriptor)"), W1)
+            return None if got == [(0, 1, "write")] else "got %r" % (got,)
+
+        for fn in (src_target_null_offset_loses_the_position, src_target_with_an_offset_keeps_the_position,
+                   src_target_failed_keeps_the_position):
+            fn.__name__ = "%s_%s" % (call, fn.__name__)
+            CASES.append(fn)
+    _mk_src(_call)
+
+
 RO_MAP = mmap(TGT, "PROT_READ", "MAP_SHARED")
 MPROT = "100 mprotect(0x7f3a5c000000, 8192, %s) = %s"
 
@@ -468,6 +626,36 @@ os.writev(fd, [b"abc", b"de"])
 os.pwritev(fd, [b"xyz"], 4096)
 """, lambda w: None if w == [(1000, 1005, "writev"), (4096, 4099, "pwritev2")] or w == [(1000, 1005, "writev"), (4096, 4099, "pwritev")]
    else "got %r" % (w,))
+
+real("strace_read_then_write_lands_after_the_read", PRE + """
+os.read(fd, 4096)
+os.write(fd, b"x")
+""", lambda w: None if w == [(4096, 4097, "write")] else "got %r" % (w,))
+
+real("strace_readv_then_write", PRE + """
+os.readv(fd, [bytearray(1000), bytearray(24)])
+os.write(fd, b"x")
+""", lambda w: None if w == [(1024, 1025, "write")] else "got %r" % (w,))
+
+real("strace_pread_does_not_move_the_position", PRE + """
+os.pread(fd, 4096, 100)
+os.write(fd, b"x")
+""", lambda w: None if w == [(0, 1, "write")] else "got %r" % (w,))
+
+real("strace_sendfile_from_target_then_write", PRE + """
+os.sendfile(os.open(o, os.O_WRONLY), fd, None, 4096)
+os.write(fd, b"x")
+""", exactly("unknown offset"))
+
+real("strace_sendfile_from_target_with_offset_then_write", PRE + """
+os.sendfile(os.open(o, os.O_WRONLY), fd, 0, 4096)
+os.write(fd, b"x")
+""", lambda w: None if w == [(0, 1, "write")] else "got %r" % (w,))
+
+real("strace_copy_file_range_from_target_then_write", PRE + """
+os.copy_file_range(fd, os.open(o, os.O_WRONLY), 4096)
+os.write(fd, b"x")
+""", exactly("unknown offset"))
 
 real("strace_pwritev2_rwf_append", PRE + """
 if not hasattr(os, "RWF_APPEND"):

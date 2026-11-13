@@ -3,6 +3,7 @@ target file, as byte ranges, whatever the bytes are.
 
 Content comparisons cannot see a rewrite with identical bytes (fwup's 128 KiB
 read-modify-write of its cache segments), so this looks at the syscalls.
+Reads advance the shared file position too, so they are traced for that.
 Fail-closed: a write whose offset cannot be worked out, a truncate, an
 O_TRUNC/O_APPEND open or a shared writable mmap of the target is reported as
 covering the whole file.
@@ -32,6 +33,15 @@ FD = re.compile(r"^(\d+)<(.*?)>")
 MMAP = re.compile(r"^[^,]*,[^,]*,\s*([^,]*),\s*([^,]*),\s*-?\d+(?:<(.*?)>)?\s*,")
 # copy_file_range/splice(fd_in, off_in, fd_out<path>, off_out, len, flags)
 COPY_DST = re.compile(r"^\d+(?:<.*?>)?\s*,\s*[^,]+,\s*\d+<(.*?)>\s*,")
+# Source descriptor and the first character of its offset argument: "N" for
+# NULL (the source's file position is used and advanced), "[" for a pointer.
+COPY_SRC = re.compile(r"^(\d+)<(.*?)>\s*,\s*(\S)")
+SENDFILE_SRC = re.compile(r"^[^,]*,\s*(\d+)<(.*?)>\s*,\s*(\S)")
+# preadv2(fd, iov, iovcnt, offset, flags)
+PREADV2_OFF = re.compile(r",\s*(-?\d+),\s*[^,]*\)\s+=")
+
+# Calls whose result moves the shared file position of their descriptor.
+POSITIONAL = ("write", "writev", "read", "readv", "preadv2")
 
 
 def have_strace():
@@ -70,7 +80,7 @@ class Tracker:
         self.target = target
         self.tables = {}   # pid -> {fd: Desc}; threads share one table
         self.pending = {}  # pid -> (call, args)
-        self.issued = {}   # pid -> (Desc, position when the pending write started)
+        self.issued = {}   # pid -> (Desc, position when the pending call started)
         self.writes = []   # (start, end_exclusive, what)
         # Once the target is mapped shared without PROT_WRITE, any later
         # writable mprotect might be upgrading that mapping; mprotect has no
@@ -96,7 +106,7 @@ class Tracker:
             call, args = self.pending.pop(pid)
             snap = self.issued.pop(pid, None)
             if snap and snap[0].pos != snap[1]:
-                # Something moved the shared position while the write was in
+                # Something moved the shared position while the call was in
                 # flight, so where it landed is unknown.
                 snap[0].pos = None
             self.handle(pid, call, args + r.group(2))
@@ -108,7 +118,7 @@ class Tracker:
         if args.endswith("<unfinished ...>"):
             body = args[: -len("<unfinished ...>")]
             self.pending[pid] = (call, body)
-            if call in ("write", "writev"):
+            if call in POSITIONAL:
                 fd, _ = self.fdarg(body)
                 desc = self.table(pid).get(fd)
                 if desc is not None:
@@ -136,6 +146,23 @@ class Tracker:
         if not m:
             return None, None
         return int(m.group(1)), m.group(2)
+
+    def source_moved(self, tab, args, pattern):
+        """A source read through a NULL offset advances that descriptor's
+        position by an amount not worth parsing out, so the position is dropped.
+        An unparseable call that names the target drops every target position."""
+        m = pattern.match(args)
+        if m:
+            if m.group(2) == self.target and m.group(3) != "[":
+                desc = tab.get(int(m.group(1)))
+                if desc is not None and desc.path == self.target:
+                    desc.pos = None
+                else:
+                    tab[int(m.group(1))] = Desc(m.group(2), None)
+        elif self.target in args:
+            for desc in tab.values():
+                if desc is not None and desc.path == self.target:
+                    desc.pos = None
 
     def handle(self, pid, call, args):
         tab = self.table(pid)
@@ -188,6 +215,8 @@ class Tracker:
         if call in ("mmap", "copy_file_range", "splice"):
             if rv is not None and rv < 0:
                 return
+            if call != "mmap":
+                self.source_moved(tab, args, COPY_SRC)
             if call == "mmap":
                 m = MMAP.match(args)
                 if m:
@@ -207,6 +236,9 @@ class Tracker:
                 self.hit(*WHOLE, "%s not parsed" % call)
                 self.ro_shared = True
             return
+
+        if call == "sendfile" and (rv is None or rv >= 0):
+            self.source_moved(tab, args, SENDFILE_SRC)
 
         fd, path = self.fdarg(args)
         if fd is None:
@@ -234,6 +266,22 @@ class Tracker:
             if "F_SETFL" in args and "O_APPEND" in args and (rv is None or rv >= 0):
                 self.hit(*WHOLE, "fcntl F_SETFL O_APPEND")
                 desc.pos = None
+            return
+
+        if call in ("read", "readv", "preadv2"):
+            if rv is not None and rv < 0:
+                return
+            if call == "preadv2":
+                m = PREADV2_OFF.search(rest)
+                if not m:
+                    desc.pos = None
+                    return
+                if m.group(1) != "-1":
+                    return  # explicit offset: the position stays put
+            if rv is None:
+                desc.pos = None
+            elif desc.pos is not None:
+                desc.pos += rv
             return
 
         if call in ("write", "pwrite64"):
@@ -304,8 +352,8 @@ def run(target, cmd, env=None, capture=True):
         log = os.path.join(d, "trace")
         argv = ["strace", "-f", "-qq", "-y", "-s", "0", "--seccomp-bpf", "-o", log,
                 "-e", "trace=open,openat,openat2,creat,close,dup,dup2,dup3,fcntl,lseek,"
-                "write,pwrite64,writev,pwritev,pwritev2,ftruncate,truncate,fallocate,"
-                "copy_file_range,sendfile,splice,ioctl,mmap,mprotect,io_uring_setup,io_uring_enter,"
+                "read,readv,preadv2,write,pwrite64,writev,pwritev,pwritev2,"
+                "ftruncate,truncate,fallocate,copy_file_range,sendfile,splice,ioctl,mmap,mprotect,io_uring_setup,io_uring_enter,"
                 "io_setup,io_submit,clone,clone3,fork,vfork"]
         r = subprocess.run(argv + ["--"] + cmd, env=env, capture_output=capture, text=True)
         t = Tracker(target)
