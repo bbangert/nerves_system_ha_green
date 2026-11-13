@@ -51,6 +51,8 @@ is_blockdev() {
 # -ef follows symlinks, so rootdisk0 -> mmcblk1 matches; the major:minor
 # fallback covers a rootdisk0 that is its own device node.
 same_dev() {
+    # busybox ash has -ef, POSIX sh does not; the stat comparison below covers the rest.
+    # shellcheck disable=SC3013
     [ "$1" -ef "$2" ] && return 0
     [ -b "$1" ] && [ -b "$2" ] || return 1
     [ "$(stat -L -c '%t:%T' "$1")" = "$(stat -L -c '%t:%T' "$2")" ]
