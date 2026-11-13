@@ -28,15 +28,24 @@ outputs are an LED, files on the SD card, and whether Linux comes up.
 `scripts/test-boot-script.sh` runs this exact file in U-Boot's sandbox
 against two disk images and checks every case below.
 
-1. **Boot disk.** The SD card (`mmc 1`) iff it reads and holds FDT magic
-   at LBA 0x4000, the SPL's own rule; otherwise the eMMC (`mmc 0`).
-   `/chosen/u-boot,spl-boot-device` is not used: older SPLs, including the
-   one in the NOR, do not set it. Nothing is looked up by GUID or name.
+1. **Boot disk.** If the control FDT's `/chosen/u-boot,spl-boot-device`
+   (set by a 2026.04 SPL: the ofpath of the controller it loaded U-Boot
+   from) is exactly `/mmc@fe2b0000`, the SD card (`mmc 1`, unless
+   `mmc dev 1` fails); exactly `/mmc@fe310000`, the eMMC (`mmc 0`). Any
+   other value, or none, leaves it to the probe, the SPL's own rule: the SD
+   card iff it reads and holds FDT magic at LBA 0x4000, otherwise the eMMC.
+   The older SPL in the NOR sets no such property, so on units where it
+   runs the probe decides, and a card whose FIT still has its magic but was
+   rejected by the SPL (which then loaded the eMMC's) is still taken as the
+   boot disk: remove the card to boot the eMMC. Read before the import and
+   kept in the snapshot with the script's own variables. Nothing is looked
+   up by GUID or name.
 2. **State.** 256 blocks at LBA 0x8000 of the boot disk (the first
    128 KiB of p1, what `fw_env.config` and fwup address) are imported with
    `env import -c`. A missing, corrupt or foreign block fails its CRC, and
    the boot goes on with the compiled-in defaults: slot A, validated.
-   The script's own variables (the list in `nerves_owned`) and the values
+   The script's own variables (the list in `nerves_owned`, which also
+   holds the step 1 results) and the values
    U-Boot computed this boot (`ver`, `fdtcontroladdr`, `serial#`,
    `ethaddr`, `nerves_disk`, `nerves_state`) are copied to RAM before the
    import and put back from that copy after it. **Invariant: after an import
@@ -76,10 +85,12 @@ against two disk images and checks every case below.
 5. **Kernel.** `Image.<slot>` and `rk3566-ha-green.<slot>.dtb` from
    `mmc <disk>:2`; `root=/dev/mmcblk<disk>p<3|4> rootfstype=squashfs
    rootwait console=ttyS2,1500000n8 console=tty0`, then
-   `uboot.boot_disk=mmcblk<disk>` and `uboot.version=<ver>` (spaces and
-   parentheses replaced by `_`), then `${cmdline}` (empty; settable with
-   `fw_setenv`). Linux ignores the two `uboot.*` parameters; read them
-   from `/proc/cmdline`.
+   `uboot.boot_disk=mmcblk<disk>`, `uboot.boot_disk_by=spl|probe` (which
+   rule of step 1 chose it), `uboot.sd_fit=present|absent` (the probe's
+   finding, so `mmcblk0` by `spl` with `present` is an SD FIT the SPL
+   passed over) and `uboot.version=<ver>` (spaces and parentheses replaced
+   by `_`), then `${cmdline}` (empty; settable with `fw_setenv`). Linux
+   ignores the `uboot.*` parameters; read them from `/proc/cmdline`.
 6. **Failure.** If a load or `booti` fails: user LED off, 10 s pause (so a
    persistent failure does not hammer the disks), `reset`.
 
@@ -96,7 +107,7 @@ steady-state boots and retry loops write nothing:
 
 | File | Content |
 | --- | --- |
-| `uboot-vars.txt` | boot disk, state result, slot, A/B variables, `nerves_spl_boot_device` (`/chosen/u-boot,spl-boot-device` or `absent`), `serial#`, `ethaddr`, `ver`, `bootargs` |
+| `uboot-vars.txt` | boot disk, state result, slot, A/B variables, `nerves_spl_boot_device` (`/chosen/u-boot,spl-boot-device`, `absent`, or `empty`), `nerves_disk_by` (`spl` or `probe`), `nerves_sd_fit`, `serial#`, `ethaddr`, `ver`, `bootargs` |
 | `uboot-fdt.dtb` | U-Boot's control FDT as the SPL handed it over (`dtc -I dtb` shows every `/chosen` property) |
 | `ramoops.bin` | RAM 0x110000–0x1fffff, the kernel's ramoops region, only if a kernel left its signature there: the previous boot's console log, when RAM survived the reset |
 

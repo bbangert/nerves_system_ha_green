@@ -31,6 +31,10 @@ project's workflow, so a damaged loader could not be repaired.
    otherwise of the eMMC, so a prepared SD card is designed to take over the
    boot, and pulling it is designed to return the unit to what the eMMC
    holds. Nothing here has been booted on hardware yet.
+   Our U-Boot boots from the disk a 2026.04 SPL says it loaded U-Boot from
+   (`u-boot,spl-boot-device`); the older SPL gives no such hint, so there it
+   repeats the FDT-magic probe, and a card with FDT magic at LBA 16384 whose
+   FIT that SPL rejected is still selected: remove the card to boot the eMMC.
 3. Our U-Boot runs one boot script (its compiled-in environment,
    `uboot/uboot.env`), loads the state block, and boots `Image.<slot>` with
    the matching device tree from the boot FAT, with the root filesystem on

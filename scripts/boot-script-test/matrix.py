@@ -39,7 +39,12 @@ DEFAULTS = {"nerves_fw_active": "a", "nerves_fw_validated": "1",
             "nerves_watchdog": "0"}
 CRUMBS = ["uboot-vars.txt", "uboot-fdt.dtb", "ramoops.bin"]
 RAMOOPS = (0x110000, 0xF0000)
-SPL_BOOT_DEVICE = "/mmc@fe2b0000"
+# /chosen/u-boot,spl-boot-device as a 2026.04 SPL writes it: the ofpath of
+# the controller it loaded U-Boot from (sdmmc0 = SD, sdhci = eMMC).
+SPL_SD = "/mmc@fe2b0000"
+SPL_EMMC = "/mmc@fe310000"
+# A property with no value, as opposed to one holding "".
+SPL_NOVALUE = object()
 
 
 def env_parse(block):
@@ -155,15 +160,20 @@ class Fixture:
         key = (sd_present, spl_boot_device)
         if key in self.dtbs:
             return self.dtbs[key]
-        name = f"test-{int(sd_present)}{int(spl_boot_device)}"
+        name = f"test-{int(sd_present)}-{len(self.dtbs)}"
+        if spl_boot_device is None:
+            chosen = ""
+        elif spl_boot_device is SPL_NOVALUE:
+            chosen = "u-boot,spl-boot-device;"
+        else:
+            chosen = f'u-boot,spl-boot-device = "{spl_boot_device}";'
         dts = os.path.join(self.dir, name + ".dts")
         with open(dts, "w") as f:
             f.write(TEST_DTS.format(
                 emmc=os.path.join(self.args.work, "emmc.img"),
                 sd=os.path.join(self.args.work, "sd.img"),
                 sd_status="okay" if sd_present else "disabled",
-                chosen=(f'u-boot,spl-boot-device = "{SPL_BOOT_DEVICE}";'
-                        if spl_boot_device else "")))
+                chosen=chosen))
         pre = dts + ".pre"
         src, build = self.args.src, self.args.build
         run(["cpp", "-P", "-nostdinc", "-undef", "-D__DTS__", "-D__ASSEMBLY__", "-x", "assembler-with-cpp",
@@ -281,9 +291,15 @@ def has_fat(kind):
     return kind != "stock"
 
 
-def model(sd_kind, emmc_kind, sd_state, emmc_state):
+def model(sd_kind, emmc_kind, sd_state, emmc_state, spl=None):
     """The spec: which disk, which slot, whether and what U-Boot saves."""
-    disk = 1 if sd_kind is not None and has_fit(sd_kind) else 0
+    sd_fit = sd_kind is not None and has_fit(sd_kind)
+    if spl == SPL_EMMC:
+        disk, by = 0, "spl"
+    elif spl == SPL_SD and sd_kind is not None:
+        disk, by = 1, "spl"
+    else:
+        disk, by = (1 if sd_fit else 0), "probe"
     kind = sd_kind if disk == 1 else emmc_kind
     stored = sd_state if disk == 1 else emmc_state
     env = dict(DEFAULTS, cmdline="")
@@ -312,6 +328,11 @@ def model(sd_kind, emmc_kind, sd_state, emmc_state):
         "watchdog": env["nerves_watchdog"] == "1",
         "cmdline": env["cmdline"].split(),
         "medium": "sd" if disk == 1 else "emmc",
+        "by": by,
+        "sd_fit": "present" if sd_fit else "absent",
+        # What uboot-vars.txt records; a "" property reads back as hex.
+        "spl": ("absent" if spl is None else "empty" if spl is SPL_NOVALUE
+                else None if spl == "" else spl),
     }
 
 
@@ -397,7 +418,7 @@ class Runner:
             for name in CRUMBS:
                 cmds.append(f"if fatload mmc 1:2 0x1000000 {name}; then save hostfs - 0x1000000 "
                             f"{outdir}/{name} ${{filesize}}; fi")
-        r = subprocess.run([self.args.uboot, "-d", self.fixture.dtb(sd_present, False),
+        r = subprocess.run([self.args.uboot, "-d", self.fixture.dtb(sd_present, None),
                             "-c", "; ".join(cmds)], stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, errors="replace", timeout=60)
         files = {"emmc": set(), "sd": set()}
@@ -421,7 +442,8 @@ def scenarios():
     for sd in kinds_sd:
         for emmc in kinds_emmc:
             yield {"name": f"sd={sd or 'absent'} emmc={emmc}", "sd": sd, "emmc": emmc,
-                   "spl": sd == "ours" and emmc == "ours"}
+                   "spl": SPL_SD if sd == "ours" and emmc == "ours" else None}
+    yield from spl_hints()
     ab = [
         ("upgrade->b, validated", "b", ["validate", None, None]),
         ("upgrade->b, never validated", "b", [None, None, None]),
@@ -441,6 +463,32 @@ def scenarios():
                     "nerves_go": "echo POISON", "nerves_owned": "bootcmd",
                     "nerves_state": "ok", "kernel_addr_r": "0x0"}}
     yield from hostile_blocks()
+
+
+def spl_hints():
+    """The SPL's own word on where it loaded U-Boot from beats the probe; a
+    value that is not exactly one of the two paths is no word at all."""
+    # The SD's FIT still has its magic but the SPL rejected it and loaded
+    # the eMMC's: the eMMC must boot and the card stay untouched.
+    yield {"name": "spl=eMMC sd=ours (rejected FIT)", "sd": "ours", "emmc": "ours", "spl": SPL_EMMC}
+    yield {"name": "spl=eMMC sd=dataonly", "sd": "dataonly", "emmc": "ours", "spl": SPL_EMMC}
+    yield {"name": "spl=eMMC sd=absent", "sd": None, "emmc": "ours", "spl": SPL_EMMC}
+    yield {"name": "spl=SD sd=ours emmc=stock", "sd": "ours", "emmc": "stock", "spl": SPL_SD}
+    yield {"name": "spl=SD sd=absent", "sd": None, "emmc": "ours", "spl": SPL_SD}
+    odd = [("upper", "/mmc@FE2B0000"), ("zero", "/mmc@0fe310000"), ("other", "/sdhci@fe310000"),
+           ("prefix", SPL_SD + "x"), ("emptystr", ""), ("novalue", SPL_NOVALUE)]
+    for label, value in odd:
+        yield {"name": f"spl={label} sd=ours", "sd": "ours", "emmc": "ours", "spl": value}
+        yield {"name": f"spl={label} sd=absent", "sd": None, "emmc": "ours", "spl": value}
+    for where, sd, emmc, spl, label in (("SD", "ours", "ours", SPL_SD, "SD"),
+                                        ("eMMC", "ours", "ours", SPL_EMMC, "eMMC"),
+                                        ("eMMC", "dataonly", "ours", None, "absent")):
+        yield {"name": f"block sets disk choice, spl={label} ({where})",
+               "sd": sd, "emmc": emmc, "spl": spl, "on": "sd" if where == "SD" else "emmc",
+               "edit": {"nerves_spl_boot_device": SPL_SD if spl != SPL_SD else SPL_EMMC,
+                        "nerves_disk_by": "spl" if spl is None else "probe",
+                        "nerves_sd_fit": "absent" if sd == "ours" else "present",
+                        "nerves_disk": "1" if where == "eMMC" else "0"}}
 
 
 def hostile_blocks():
@@ -532,6 +580,7 @@ def binding_blocks(base, where):
     # compiled-in variables. The block carries every other variable the
     # script sets, so the boot itself is checked in full.
     created = {k: "x" for k in ("bootargs", "nerves_uboot_version", "nerves_spl_boot_device",
+                                "nerves_disk_by", "nerves_sd_fit",
                                 "nerves_fdt_size", "nerves_crumb_src", "nerves_crumb_size",
                                 "nerves_crumb_file", "filesize", "fileaddr", "fdtaddr")}
     yield dict(base, name=f"table full, upgrade->b ({where})",
@@ -612,9 +661,9 @@ def run_scenario(runner, fixture, sc):
             ram = make_memfile(memfile, 512 << 20)
         sd_state = sd.state() if sd and "sd" not in absent else None
         emmc_state = emmc.state() if "emmc" not in absent else None
-        exp = model(sc["sd"], sc["emmc"], sd_state, emmc_state)
+        exp = model(sc["sd"], sc["emmc"], sd_state, emmc_state, sc.get("spl"))
         before = {"sd": sd.hashes() if sd else None, "emmc": emmc.hashes()}
-        out = runner.boot(sd is not None, sc.get("spl", False), memfile)
+        out = runner.boot(sd is not None, sc.get("spl"), memfile)
         got = parse_boot(out)
         after = {"sd": sd.hashes() if sd else None, "emmc": emmc.hashes()}
         changed = {m: {r for r in after[m] if after[m][r] != before[m][r]}
@@ -646,7 +695,8 @@ def run_scenario(runner, fixture, sc):
             check(cons == ["console=ttyS2,1500000n8", "console=tty0"], f"consoles {cons}")
             want_args = [f"root=/dev/mmcblk{exp['disk']}p{part}", "rootfstype=squashfs", "rootwait",
                          "console=ttyS2,1500000n8", "console=tty0",
-                         f"uboot.boot_disk=mmcblk{exp['disk']}"] + exp["cmdline"]
+                         f"uboot.boot_disk=mmcblk{exp['disk']}", f"uboot.boot_disk_by={exp['by']}",
+                         f"uboot.sd_fit={exp['sd_fit']}"] + exp["cmdline"]
             check([a for a in args if not a.startswith("uboot.version=")] == want_args,
                   f"bootargs {got.get('bootargs')}, want {' '.join(want_args)} + uboot.version")
             check(got.get("kernel") == f"IMAGE.{exp['slot']}@{exp['medium']}",
@@ -716,11 +766,14 @@ def check_crumbs(sc, outdir, last, ram):
     if "\0" in text:
         failures.append(f"{sc['name']}: uboot-vars.txt is not plain text")
     v = dict(l.split("=", 1) for l in text.splitlines() if "=" in l)
-    want_spl = SPL_BOOT_DEVICE if sc.get("spl") else "absent"
-    for k, want in (("nerves_disk", "1"), ("nerves_spl_boot_device", want_spl),
-                    ("nerves_slot", last[1]["slot"]), ("nerves_state", last[1]["state"])):
-        if v.get(k) != want:
-            failures.append(f"{sc['name']}: uboot-vars.txt {k}={v.get(k)}, want {want}")
+    want = [("nerves_disk", "1"), ("nerves_disk_by", last[1]["by"]),
+            ("nerves_sd_fit", last[1]["sd_fit"])]
+    if last[1]["spl"] is not None:
+        want.append(("nerves_spl_boot_device", last[1]["spl"]))
+    for k, value in want + [
+                    ("nerves_slot", last[1]["slot"]), ("nerves_state", last[1]["state"])]:
+        if v.get(k) != value:
+            failures.append(f"{sc['name']}: uboot-vars.txt {k}={v.get(k)}, want {value}")
     if not v.get("ver", "").startswith("U-Boot 2026.04"):
         failures.append(f"{sc['name']}: uboot-vars.txt ver={v.get('ver')}")
     with open(os.path.join(outdir, "uboot-fdt.dtb"), "rb") as f:
@@ -743,8 +796,22 @@ def owned_check(env_path):
         if m:
             keys[m.group(1)] = m.group(2)
     state = set(DEFAULTS) | {"cmdline"}
-    missing = set(keys) - set(keys.get("nerves_owned", "").split()) - state
-    return [f"uboot.env: {k} is not in nerves_owned" for k in sorted(missing)]
+    owned = set(keys.get("nerves_owned", "").split())
+    missing = set(keys) - owned - state
+    out = [f"uboot.env: {k} is not in nerves_owned" for k in sorted(missing)]
+    # What the disk choice sets before the import must be in both snapshots
+    # (the copy and the re-export compared with it), or a block could change it.
+    picked = set(re.findall(r"setenv (\w+)", keys.get("nerves_pick_disk", "")))
+    if not picked:
+        out.append("uboot.env: nerves_pick_disk sets nothing (the script changed shape)")
+    exports = re.findall(r"env export -t -s 0x10000 0x[0-9a-f]+ ([^;&]*)", keys.get("nerves_load_state", ""))
+    if len(exports) != 2:
+        out.append(f"uboot.env: nerves_load_state has {len(exports)} snapshot exports, want 2")
+    for names in exports:
+        listed = set(names.replace("${nerves_owned}", " ".join(owned)).split())
+        out += [f"uboot.env: {k}, set by nerves_pick_disk, is not in a snapshot"
+                for k in sorted(picked - listed)]
+    return out
 
 
 def main():
