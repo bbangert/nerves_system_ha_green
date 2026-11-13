@@ -575,18 +575,43 @@ def binding_blocks(base, where):
     # U-Boot escapes newlines in values but not in names, so a text export
     # of this block would read back as nerves_fw_active=b.
     yield dict(base, name=f"newline in a name ({where})", edit={"x\nnerves_fw_active": "b"})
-    # A block can fill U-Boot's 521-entry hash table, so that creating a
-    # variable fails. It cannot stop the A/B rule: nerves_init writes only
-    # compiled-in variables. The block carries every other variable the
-    # script sets, so the boot itself is checked in full.
-    created = {k: "x" for k in ("bootargs", "nerves_uboot_version", "nerves_spl_boot_device",
-                                "nerves_disk_by", "nerves_sd_fit",
-                                "nerves_fdt_size", "nerves_crumb_src", "nerves_crumb_size",
-                                "nerves_crumb_file", "filesize", "fileaddr", "fdtaddr")}
-    yield dict(base, name=f"table full, upgrade->b ({where})",
-               edit=dict(created, nerves_fw_active="b", nerves_fw_booted="0",
-                         nerves_fw_validated="0"),
-               post=[(f"fill{i:03d}", "x") for i in range(600)], full=True)
+    yield from table_full_blocks(base, where)
+
+
+# Every variable the script creates or sets after the state load, explicitly
+# or as a command's side effect.
+POST_LOAD = ("bootargs", "nerves_uboot_version", "nerves_args_rest", "filesize",
+             "nerves_crumb_src", "nerves_crumb_size", "nerves_crumb_file", "fileaddr", "fdtaddr")
+FILL = [(f"fill{i:03d}", "x") for i in range(600)]
+
+
+def table_full_blocks(base, where):
+    """A block can fill U-Boot's 521-entry hash table, so that creating a
+    variable fails. Whatever it leaves out, the boot must go on with exactly
+    this boot's command line and the A/B rule."""
+    upgrade_b = {"nerves_fw_active": "b", "nerves_fw_booted": "0", "nerves_fw_validated": "0"}
+    present = {k: "x" for k in POST_LOAD}
+    yield dict(base, name=f"table full, upgrade->b ({where})", edit=dict(present, **upgrade_b),
+               post=FILL, full=True)
+    yield dict(base, name=f"table full, none set later ({where})", edit=upgrade_b,
+               post=FILL, full=True)
+    yield dict(base, name=f"table full, B unvalidated ({where})", edit=UNVALIDATED_B,
+               post=FILL, full=True)
+    for var in POST_LOAD:
+        yield dict(base, name=f"table full, lacks {var} ({where})",
+                   edit=dict({k: v for k, v in present.items() if k != var}, **upgrade_b),
+                   post=FILL, full=True)
+    # A block that deletes compiled-in variables fills their slots too; the
+    # rebuild puts them back, so part of the snapshot no longer fits and the
+    # block counts as absent.
+    yield dict(base, name=f"table full, deletes bootargs ({where})", edit=UNVALIDATED_B,
+               post=[("bootargs", ""), ("filesize", "")] + FILL, full=True, malformed=True)
+    # More cmdline words than CONFIG_SYS_MAXARGS lets setenv take, then a
+    # cmdline longer than setexpr's 16 KiB buffer: no command line, no boot.
+    yield dict(base, name=f"cmdline over maxargs ({where})",
+               edit={"cmdline": " ".join(f"w{i}" for i in range(60))}, args_fail="unset")
+    yield dict(base, name=f"cmdline over 16 KiB ({where})",
+               edit={"cmdline": " ".join("v" * 2000 for _ in range(9))}, args_fail=True)
 
 
 def userspace_keys():
@@ -679,7 +704,7 @@ def run_scenario(runner, fixture, sc):
             # Later boots import U-Boot's own save of the full table, which
             # fills it exactly and so prints nothing.
             check("can't insert" in out, "the block did not fill the variable table")
-        want_outcome = "boot" if exp["boots"] else "reset"
+        want_outcome = "boot" if exp["boots"] and not sc.get("args_fail") else "reset"
         check(got["outcome"] == want_outcome, f"outcome {got['outcome']}, want {want_outcome}")
         check(got.get("disk") == str(exp["disk"]), f"disk {got.get('disk')}, want {exp['disk']}")
         check(got.get("state") == exp["state"], f"state {got.get('state')}, want {exp['state']}")
@@ -687,7 +712,8 @@ def run_scenario(runner, fixture, sc):
             part = 4 if exp["slot"] == "b" else 3
             check(got.get("slot") == exp["slot"], f"slot {got.get('slot')}, want {exp['slot']}")
             args = got.get("bootargs", "").split()
-            check(f"root=/dev/mmcblk{exp['disk']}p{part}" in args, f"bootargs root: {got.get('bootargs')}")
+            roots = [a for a in args if a.startswith("root=")]
+            check(roots == [f"root=/dev/mmcblk{exp['disk']}p{part}"], f"bootargs root: {got.get('bootargs')}")
             check(f"uboot.boot_disk=mmcblk{exp['disk']}" in args, "bootargs boot_disk")
             check(any(re.fullmatch(r"uboot\.version=U-Boot_2026\.04_[^ ()]+", a) for a in args),
                   "bootargs uboot.version")
@@ -774,15 +800,24 @@ def check_crumbs(sc, outdir, last, ram):
                     ("nerves_slot", last[1]["slot"]), ("nerves_state", last[1]["state"])]:
         if v.get(k) != value:
             failures.append(f"{sc['name']}: uboot-vars.txt {k}={v.get(k)}, want {value}")
+    # What the last boot handed to booti, or the placeholder nothing boots with.
+    want_args = last[2].get("bootargs") if last[2]["outcome"] == "boot" else None
+    if sc.get("args_fail") == "unset":
+        want_args = "unset"
+    if want_args is not None and v.get("bootargs") != want_args:
+        failures.append(f"{sc['name']}: uboot-vars.txt bootargs={v.get('bootargs')}, want {want_args}")
     if not v.get("ver", "").startswith("U-Boot 2026.04"):
         failures.append(f"{sc['name']}: uboot-vars.txt ver={v.get('ver')}")
-    with open(os.path.join(outdir, "uboot-fdt.dtb"), "rb") as f:
-        if f.read(4) != bytes.fromhex("d00dfeed"):
-            failures.append(f"{sc['name']}: uboot-fdt.dtb is not a dtb")
-    if ram is not None:
-        with open(os.path.join(outdir, "ramoops.bin"), "rb") as f:
-            if f.read() != ram:
-                failures.append(f"{sc['name']}: ramoops.bin differs from the RAM region")
+    try:
+        with open(os.path.join(outdir, "uboot-fdt.dtb"), "rb") as f:
+            if f.read(4) != bytes.fromhex("d00dfeed"):
+                failures.append(f"{sc['name']}: uboot-fdt.dtb is not a dtb")
+        if ram is not None:
+            with open(os.path.join(outdir, "ramoops.bin"), "rb") as f:
+                if f.read() != ram:
+                    failures.append(f"{sc['name']}: ramoops.bin differs from the RAM region")
+    except OSError as e:
+        failures.append(f"{sc['name']}: breadcrumb not readable: {e}")
     return failures
 
 
@@ -808,9 +843,27 @@ def owned_check(env_path):
     if len(exports) != 2:
         out.append(f"uboot.env: nerves_load_state has {len(exports)} snapshot exports, want 2")
     for names in exports:
-        listed = set(names.replace("${nerves_owned}", " ".join(owned)).split())
+        words = names.replace("${nerves_owned}", " ".join(owned)).split()
+        listed = set(words)
         out += [f"uboot.env: {k}, set by nerves_pick_disk, is not in a snapshot"
                 for k in sorted(picked - listed)]
+        # `env export -t -s <size> <addr>` plus the names, against the
+        # Green's (and the sandbox's) CONFIG_SYS_MAXARGS.
+        if 6 + len(words) > 64:
+            out.append(f"uboot.env: a snapshot export has {6 + len(words)} arguments, over 64")
+    # Past the import a block may have filled the table, so every variable a
+    # later step sets must exist already: compiled in, and owned unless it is
+    # Nerves state. nerves_load_state's own `setenv nerves_state ok` follows
+    # the check that the snapshot, nerves_state included, was put back.
+    setters = r"(?:setenv|env set|setexpr|fdt header get|fdt get (?:value|addr|size|name))"
+    for k, v in keys.items():
+        if k in ("nerves_pick_disk", "nerves_load_state", "nerves_owned"):
+            continue
+        targets = set(re.findall(setters + r" (\S+)", v))
+        if re.search(r"\b(?:load|fatload|env export) ", v):
+            targets.add("filesize")
+        out += [f"uboot.env: {k} sets {t}, which is not compiled in and owned"
+                for t in sorted(targets - (set(keys) & (owned | state)))]
     return out
 
 

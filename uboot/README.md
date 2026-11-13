@@ -65,10 +65,10 @@ against two disk images and checks every case below.
    export (a text one does not escape newlines in names) on top of the
    compiled-in environment, which drops any binding it left
    behind by rebinding and deleting those two, and brings back with its
-   default any compiled-in variable it deleted. Step 3 writes only
-   compiled-in variables (also `nerves_save_needed`, `nerves_slot`,
-   `nerves_part`), so it only overwrites and cannot fail, not even when a
-   block fills U-Boot's 521-entry variable table.
+   default any compiled-in variable it deleted. Every variable the script
+   sets from here on is compiled in (`bootargs` and `filesize` too) and,
+   except the Nerves state, in `nerves_owned`, so setting it only overwrites and cannot fail, not even
+   when a block fills U-Boot's 521-entry variable table.
 3. **A/B,** the Nerves rule: the first boot of a slot sets
    `nerves_fw_booted=1`; a slot that boots again with
    `nerves_fw_validated=0` is reverted (`nerves_fw_active` flips,
@@ -91,7 +91,9 @@ against two disk images and checks every case below.
    passed over) and `uboot.version=<ver>` (spaces and parentheses replaced
    by `_`), then `${cmdline}` (empty; settable with `fw_setenv`). Linux
    ignores the `uboot.*` parameters; read them from `/proc/cmdline`.
-6. **Failure.** If a load or `booti` fails: user LED off, 10 s pause (so a
+6. **Failure.** If a load or `booti` fails, or the command line could not
+   be set or does not start with this boot's `root=` (a `cmdline` of more
+   than 53 words, for one): user LED off, 10 s pause (so a
    persistent failure does not hammer the disks), `reset`.
 
 LED code (user LED): solid from the first line of the script; off for
