@@ -1,165 +1,158 @@
-# U-Boot boot chain
+# U-Boot
 
-The ROCK 4D boot ROM order is SPI NOR → UFS → USB (maskrom); it never
-boots from SD. Every standard ROCK 4D has a 16 MB SPI NOR on board, so
-U-Boot lives there and the UFS module only carries the Nerves environment,
-kernels and root filesystems:
+Boot chain:
 
-| Blob                      | Location                       | Contents                                                         |
-| ------------------------- | ------------------------------ | ---------------------------------------------------------------- |
-| `u-boot-rockchip-spi.bin` | SPI NOR, offset 0              | idblock (DDR init + SPL) + FIT (U-Boot proper + BL31) at 0x60000 |
-| `uboot-env.bin`           | UFS LUN, start of GPT p1 `env` | Nerves environment (built from `uboot.env`)                      |
+1. BootROM → the board's stock first stage. Read out of one unit running stock Home Assistant OS 18.4 (not boot-tested with this system): the SPI NOR holds `U-Boot SPL 2023.07.02`, the eMMC (LBA 64–16383) `U-Boot SPL 2026.04`, and both SPLs' device trees carry the boot order SD card → eMMC → SPI NOR (`u-boot,spl-boot-order`). Which of the two the BootROM runs is inferred (no `u-boot,spl-boot-device` in `/chosen`, which a 2026.04 SPL would set), not proven; neither is ever written by us.
+2. Either SPL is designed to load our `u-boot.itb` from raw LBA 16384 of the SD card if it carries FDT magic there, else of the eMMC.
+3. Our U-Boot runs the boot script below and boots `Image.<slot>` with `booti`.
 
-## Build
+U-Boot proper is v2026.04 plus Home Assistant OS's Green patches
+(`patches/`, unmodified, so no C of ours), `green_defconfig` and
+`green.fragment`. The whole default environment, and so the whole boot
+logic, is `uboot.env`, compiled in through `BR2_TARGET_UBOOT_DEFAULT_ENV_FILE`
+(without it the board would silently run `bootflow scan`). Only `u-boot.itb`
+is installed.
 
-Buildroot builds `u-boot-rockchip-spi.bin` (`BR2_TARGET_UBOOT` in
-`nerves_defconfig`) from mainline U-Boot v2027.01-rc1,
-`rock-4d-rk3576_defconfig` plus `ufs.fragment`. binman packs the Rockchip
-DDR-init TPL and BL31 from `rkbin/` (provenance and hashes in
-`rkbin/README.md`). The result lands in the system's `images/` directory.
+The stock SPL accepts only a FIT of a certain shape:
+uncompressed images, sha256 hashes, `firmware = "atf-1"`. `stock-fit-contract.txt`
+is that shape, derived from the FIT in Home Assistant OS 18.4's Green image,
+and `scripts/check-fit.sh` holds every build to it, together with the
+U-Boot config options behind it (`SPL_FIT_SIGNATURE=y`, `SPL_SHA256=y`, no
+`SPL_GZIP`/`SPL_LZMA`/`ENV_REDUNDANT`/`CMD_SF`, `ENV_IS_NOWHERE=y`,
+`ENV_SIZE=0x20000`).
 
-`ufs.fragment` adds:
+## Boot script
 
-- `ENV_IS_IN_SCSI` with `ENV_SCSI_PART_UUID`: U-Boot reads the env from the
-  start of the GPT partition whose **unique** GUID matches. That GUID is
-  `UBOOT_ENV_PART_GUID` in `fwup_include/fwup-common.conf`, p1's `guid`.
-  `nerves_env_uuid` in `uboot.env` repeats it for the kernel loads. All
-  three must be identical; `scripts/check-env-config.sh` runs from
-  `post-build.sh` and fails the build if they are not. To change it, edit
-  all three.
-- `ENV_SIZE=0x20000`, which must equal `UBOOT_ENV_COUNT` × 512, the
-  `uboot-env.bin` size and the `fw_env.config` size (all CRC `size - 4`
-  bytes); `check-env-config.sh` enforces this too.
-- `FS_FAT_HANDLE_SECTOR_SIZE_MISMATCH`: fwup can only make a 512-byte-BPB
-  FAT, and U-Boot otherwise refuses it on the 4096-byte-sector LUN.
-- SPI NOR vendor drivers (XMC, Macronix, GigaDevice, Winbond): the NOR part
-  differs between board revisions.
+There is no console, so the script never stops at a prompt, and its only
+outputs are an LED, files on the SD card, and whether Linux comes up.
+`scripts/test-boot-script.sh` runs this exact file in U-Boot's sandbox
+against two disk images and checks every case below.
 
-The v0.1.x prebuilt image (env on SD) and its Docker build script live in
-git history at tag v0.1.1.
+1. **Boot disk.** If the control FDT's `/chosen/u-boot,spl-boot-device`
+   (set by a 2026.04 SPL: the ofpath of the controller it loaded U-Boot
+   from) is exactly `/mmc@fe2b0000`, the SD card (`mmc 1`, unless
+   `mmc dev 1` fails); exactly `/mmc@fe310000`, the eMMC (`mmc 0`). Any
+   other value, or none, leaves it to the probe, the SPL's own rule: the SD
+   card iff it reads and holds FDT magic at LBA 0x4000, otherwise the eMMC.
+   The older SPL in the NOR sets no such property, so on units where it
+   runs the probe decides, and a card whose FIT still has its magic but was
+   rejected by the SPL (which then loaded the eMMC's) is still taken as the
+   boot disk: remove the card to boot the eMMC. Read before the import and
+   kept in the snapshot with the script's own variables. Nothing is looked
+   up by GUID or name.
+2. **State.** 256 blocks at LBA 0x8000 of the boot disk (the first
+   128 KiB of p1, what `fw_env.config` and fwup address) are imported with
+   `env import -c`. A missing, corrupt or foreign block fails its CRC, and
+   the boot goes on with the compiled-in defaults: slot A, validated.
+   The script's own variables (the list in `nerves_owned`, which also
+   holds the step 1 results) and the values
+   U-Boot computed this boot (`ver`, `fdtcontroladdr`, `serial#`,
+   `ethaddr`, `nerves_disk`, `nerves_state`) are copied to RAM before the
+   import and put back from that copy after it. **Invariant: after an import
+   the script acts on no variable until those variables are shown to
+   equal the copy (re-exported and compared byte for byte; a changed name
+   list changes the export too); if they do not, or
+   the import failed even part-way (an empty key), the whole environment
+   is reset to the compiled-in one plus the copy, which is exactly a boot
+   without a block.** Until then the script uses only literal addresses.
+   So neither an older export nor a malformed block can change the disk,
+   the script, or, unless it imports cleanly, the slot.
+   **Invariant: no flag or callback binding from a block ever constrains
+   the script.** A block that still declares `.flags` or `.callbacks`
+   after its import counts as absent, so U-Boot never rewrites it either
+   (after a `fw_setenv .flags …` the board boots slot A with the
+   defaults). Every other block is rebuilt before use, from its own binary
+   export (a text one does not escape newlines in names) on top of the
+   compiled-in environment, which drops any binding it left
+   behind by rebinding and deleting those two, and brings back with its
+   default any compiled-in variable it deleted. Every variable the script
+   sets from here on is compiled in (`bootargs` and `filesize` too) and,
+   except the Nerves state, in `nerves_owned`, so setting it only overwrites and cannot fail, not even
+   when a block fills U-Boot's 521-entry variable table.
+3. **A/B,** the Nerves rule: the first boot of a slot sets
+   `nerves_fw_booted=1`; a slot that boots again with
+   `nerves_fw_validated=0` is reverted (`nerves_fw_active` flips,
+   `nerves_fw_validated=1`). `nerves_fw_autovalidate=1` validates on first
+   boot.
+4. **Save.** The only raw write U-Boot makes: `env export -c` of the whole
+   environment to LBA 0x8000 of the boot disk, only when step 3 changed
+   something and only if the block from that same disk counted in this
+   boot. **A disk without our valid state block is never written by
+   U-Boot**; this is what keeps a stock eMMC untouched while the system
+   runs from SD. U-Boot cannot hold an empty value, so a key fwup wrote as
+   `""` is gone from the block after a U-Boot save (as on every Nerves
+   board).
+5. **Kernel.** `Image.<slot>` and `rk3566-ha-green.<slot>.dtb` from
+   `mmc <disk>:2`; `root=/dev/mmcblk<disk>p<3|4> rootfstype=squashfs
+   rootwait console=ttyS2,1500000n8 console=tty0`, then
+   `uboot.boot_disk=mmcblk<disk>`, `uboot.boot_disk_by=spl|probe` (which
+   rule of step 1 chose it), `uboot.sd_fit=present|absent` (the probe's
+   finding, so `mmcblk0` by `spl` with `present` is an SD FIT the SPL
+   passed over) and `uboot.version=<ver>` (spaces and parentheses replaced
+   by `_`), then `${cmdline}` (empty; settable with `fw_setenv`). Linux
+   ignores the `uboot.*` parameters; read them from `/proc/cmdline`.
+6. **Failure.** If a load or `booti` fails, or the command line could not
+   be set or does not start with this boot's `root=` (a `cmdline` of more
+   than 53 words, for one): user LED off, 10 s pause (so a
+   persistent failure does not hammer the disks), `reset`.
 
-Licensing: U-Boot is GPL-2.0-or-later (corresponding source: the pinned
-tag at https://github.com/u-boot/u-boot). The DDR-init and BL31 components
-in `u-boot-rockchip-spi.bin` and `rk3576_spl_loader_v1.09.108.bin` are
-Rockchip proprietary blobs from
-[rockchip-linux/rkbin](https://github.com/rockchip-linux/rkbin),
-redistributable per `rkbin/LICENSE` (= `LICENSES/LICENSE.rockchip-rkbin`).
+LED code (user LED): solid from the first line of the script; off for
+10 s before each retry when U-Boot cannot boot; heartbeat once the kernel
+runs (kernel DTS).
 
-## Boot and automatic revert
+### Breadcrumbs
 
-U-Boot loads the env from p1 (the lookup runs `scsi scan`), then runs
-`nerves_init`/`nerves_boot`: `nerves_find_disk` picks the SCSI device
-whose p1 has `nerves_env_uuid` (default 0), then it loads the active
-slot's `Image.<slot>` and dtb from that device's FAT bootfs (p2) and boots
-them directly
-(`root=PARTUUID=<slot GUID>`). Automatic revert follows the standard Nerves
-model:
+Only when the boot disk is the SD card, on its FAT partition (`mmc 1:2`,
+a literal, so they can never land on the eMMC). Fixed names, and each is
+written only if it differs from the copy already on the card, so
+steady-state boots and retry loops write nothing:
 
-- U-Boot: with `nerves_fw_autovalidate=0`, new firmware boots once
-  (`booted` 0→1) leaving `nerves_fw_validated=0`. If the next boot still
-  sees `validated=0`, U-Boot boots the other slot.
-- Application: calls `Nerves.Runtime.validate_firmware()` once healthy
-  (sets `validated=1`), or the update reverts.
+| File | Content |
+| --- | --- |
+| `uboot-vars.txt` | boot disk, state result, slot, A/B variables, `nerves_spl_boot_device` (`/chosen/u-boot,spl-boot-device`, `absent`, or `empty`), `nerves_disk_by` (`spl` or `probe`), `nerves_sd_fit`, `serial#`, `ethaddr`, `ver`, `bootargs` |
+| `uboot-fdt.dtb` | U-Boot's control FDT as the SPL handed it over (`dtc -I dtb` shows every `/chosen` property) |
+| `ramoops.bin` | RAM 0x110000–0x1fffff, the kernel's ramoops region, only if a kernel left its signature there: the previous boot's console log, when RAM survived the reset |
 
-If `nerves_boot` ever fails, `bootcmd` falls through to `bootflow scan -lb`,
-which boots `extlinux/extlinux.conf` from the bootfs. A missing or corrupt
-environment block makes U-Boot fall back to its compiled-in default
-environment, which does the same, so a bad environment cannot brick the
-device. Both fallbacks depend on bootfs being the only partition marked
-bootable: `bootflow scan` skips unbootable partitions (only p1, the raw
-env, if none is marked). The env is a single copy (`env/scsi.c` has no
-redundant mode): a torn `saveenv` costs the revert on that one boot.
+### Watchdog
 
-## uboot.env: the shared firmware/boot environment
+Off by default; `fw_setenv nerves_watchdog 1` turns it on. The script then
+starts the SoC watchdog (dw-wdt, 0xfe600000) just before `booti` with its
+longest timeout, 2^31 cycles of 24 MHz (about 89 s), reset on first
+expiry, so a hung kernel resets and the next SD boot saves its ramoops
+log. These are plain register writes: U-Boot's driver cannot probe on
+RK3568 (the clock driver has no enable op). Once started the dw-wdt only
+stops on reset, so turn it on only after Linux is seen to take it over
+(`dw_wdt` built in, `WATCHDOG_HANDLE_BOOT_ENABLED=y`, then `heart`);
+otherwise the board resets about 89 s into every boot.
 
-`uboot.env` is compiled into `uboot-env.bin` and written at the start of p1
-(`UBOOT_ENV_OFFSET`, see `fwup_include/fwup-common.conf`).
-`rootfs_overlay/etc/fw_env.config` reads it through the whole disk at
-1 MiB, the same device fwup writes, because Linux caches `sda` and `sda1`
-separately and a read through p1 could miss fwup's write. It is a single fw_env block shared by
-three parties: U-Boot reads it to pick the boot slot, `nerves_runtime`/
-`fwup` read and write the `nerves_fw_*` firmware metadata, and `boardid`
-reads the serial number.
+## Configuration delta
 
-## Flashing the SPI NOR (one-time provisioning, via maskrom)
+Every Kconfig difference between the U-Boot this system builds and the
+reference it starts from: `green_defconfig` plus HAOS's own fragments
+(`bootloader/uboot.config` and `board/nabucasa/green/uboot.config` in
+home-assistant/operating-system 18.4), merged the way Buildroot does. Both
+sides leave out `CMD_FILEENV`; HAOS's build additionally carries the C patch
+for it, which this system does not need.
 
-> **Remove the UFS module first** (or leave it in the USB reader). The
-> maskrom loader (`rk3576_spl_loader_v1.09.108.bin` with `cs 9`) also
-> re-provisions a seated UFS module and erases it: on a 128 GB module LUN0
-> grew by 48 MiB, the boot LUNs folded into it, with an empty GPT and zeroed
-> env and data. Reflash the module with `scripts/flash-ufs.sh` if that
-> happened.
+| Option | HAOS reference | Here | Why |
+| --- | --- | --- | --- |
+| `CONFIG_ENV_SIZE` | `0x1f000` | `0x20000` | The state block is 128 KiB in fwup, `fw_env.config` and the env image; U-Boot and fwup both CRC size minus 4 bytes. |
+| `CONFIG_CMD_SF` (and `_TEST`) | `y` | not set | No `sf` command: the SPI NOR holds the factory loader and must never be written. |
+| `CONFIG_ENV_USE_DEFAULT_ENV_TEXT_FILE`, `CONFIG_ENV_DEFAULT_ENV_TEXT_FILE` | not set | `y`, `uboot/uboot.env` | The compiled-in environment is the boot script. Buildroot sets both from `BR2_TARGET_UBOOT_DEFAULT_ENV_FILE`. |
+| `CONFIG_BOOTCOMMAND` | `"bootflow scan -lb"` | gone | Kconfig drops it once the environment comes from a text file; `bootcmd` is in `uboot.env`. |
+| `CONFIG_VERSION_VARIABLE` | not set | `y` | Provides `ver`, which goes on the kernel command line and into the breadcrumbs. |
+| `CONFIG_SYS_PROMPT` | `"HAOS> "` | `"=> "` | `green.fragment` does not carry HAOS's prompt; there is no console, so it is never seen. |
+| `CONFIG_GCC_VERSION` and the compiler banner | host GCC 15.2.0 | Nerves toolchain GCC 15.3.0 | Build environment only. |
 
-Flashing is done over USB from the host, with no OS on the board involved.
-Hold the MASKROM button while applying power. The maskrom USB device
-appears on the upper USB 3.0 Type-A OTG port (top-left, nearest the
-corner); use a USB-A↔A or USB-A↔C data cable to the host. Every tagged
-[release](https://github.com/bbangert/nerves_system_rock_4d/releases)
-attaches `u-boot-rockchip-spi.bin`, `rk3576_spl_loader_v1.09.108.bin` and a
-`SHA256SUMS` for both; a local build has the SPI image in its `images/`
-directory. Check the hashes, then:
+To reproduce, from an unpacked U-Boot v2026.04 with `patches/*.patch`
+applied (`$O` outputs are separate directories):
 
 ```sh
-rkdeveloptool db rk3576_spl_loader_v1.09.108.bin        # bootstrap the loader (uboot/ in a checkout)
-rkdeveloptool cs 9                                      # select the SPI NOR
-rkdeveloptool wl 0 u-boot-rockchip-spi.bin              # write at offset 0
-rkdeveloptool rd                                        # reboot
+make O=$PWD/../ours green_defconfig
+printf 'CONFIG_ENV_USE_DEFAULT_ENV_TEXT_FILE=y\nCONFIG_ENV_DEFAULT_ENV_TEXT_FILE="%s"\n' "$REPO/uboot/uboot.env" >../ours.fragment
+scripts/kconfig/merge_config.sh -m -O ../ours ../ours/.config "$REPO/uboot/green.fragment" ../ours.fragment && make O=$PWD/../ours olddefconfig
+# the reference: the same, merging HAOS's two fragments (minus CMD_FILEENV) instead
+diff ../haos/.config ../ours/.config
 ```
 
-Verify on the serial console: the U-Boot banner should read
-v2027.01-rc1.
-
-`rk3576_spl_loader_v1.09.108.bin` is the RK3576 maskrom download loader,
-built from the Rockchip vendor SDK's U-Boot (`./make.sh rk3576` packs it
-from the rkbin SPL/DDR components). If `cs` is unsupported by your
-rkdeveloptool build, use a current build from
-https://github.com/rockchip-linux/rkdeveloptool or Rockchip's RKDevTool
-on Windows.
-
-Maskrom is also the recovery path if a NOR write is ever interrupted: the
-BootROM always runs first, so the board is not brickable this way.
-
-## Reflashing from a running system
-
-Firmware upgrades never touch the NOR. Each rootfs carries the SPI image
-its system release built, at `/usr/share/rock4d/u-boot-rockchip-spi.bin`
-(with a `.sha256` beside it), and `rock4d-bootloader` checks or writes it.
-Nothing runs it automatically: the NOR has no A/B copy, and a power loss
-mid-write leaves a board only maskrom can recover.
-
-```sh
-rock4d-bootloader status        # sha256 + DDR "fwver" of the shipped image and the NOR;
-                                # prints match (exit 0) or differ (exit 1)
-rock4d-bootloader update --yes  # flashcp the shipped image, then verify by read-back
-```
-
-`status` and the `--yes` refusal are verified on hardware. **The write
-path (`update --yes`: `flashcp` plus the read-back `cmp`) has not been run
-on hardware yet.** `flashcp -v` itself erases, writes and verifies, so the
-risk is in the surrounding script, not the flash write.
-
-From Elixir, `System.cmd("rock4d-bootloader", ["status"])`. Under the hood
-the NOR is the `loader` MTD partition of the `-spi` device tree, and
-`flashcp -v <image> /dev/mtd0` is the manual equivalent.
-
-A 6 GB board still on the v1.12 DDR blob boots Linux only with its RAM
-capped. To move it to v1.13 without maskrom:
-
-1. Put its UFS module in a USB reader on a Linux host. The plain
-   `fw_setenv` uses this system's `/etc/fw_env.config` (`/dev/rootdisk0`),
-   so point it at the module explicitly; the env is 128 KiB at byte offset
-   1 MiB of the whole disk:
-
-   ```sh
-   echo "/dev/sdX 0x100000 0x20000" > reader-fw_env.config
-   fw_setenv -c reader-fw_env.config cmdline mem=2816M
-   ```
-
-2. Put the module back and boot the board. It must be running firmware
-   built on nerves_system_rock_4d v0.2.3 or later, which carries
-   `rock4d-bootloader` and the v1.13 image; if it is older, upgrade it
-   first (`fwup` over SSH). Then run `rock4d-bootloader update --yes`.
-3. On the board, `fw_setenv cmdline ""` and reboot into the full 6 GB.
-
-Serial console for watching the boot: UART0 on the 40-pin header, pin 8
-(TX), pin 10 (RX), pin 6 (GND), 1500000 8N1, no flow control.
+Inside a build, ours is `build/uboot-custom/.config` of the Buildroot output.
