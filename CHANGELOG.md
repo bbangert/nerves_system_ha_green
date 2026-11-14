@@ -46,6 +46,14 @@ Verified on that unit:
   off, the restart does not reset the PMIC, and the stock SPL skipped the
   card. A panic or watchdog reset would have left the card and its I/O
   rail at 1.8 V, a state that SPL is not built to boot from.
+- All RAM above 4 GiB (256 MiB on a 4 GiB unit) is reserved `no-map` in the
+  device tree and never used, which leaves about 3.75 GiB. The RGA2 core has
+  no IOMMU and addresses only the first 4 GiB, and that RAM is the kernel's
+  whole Normal zone, so ordinary dma-bufs landed there first and would have
+  failed an RGA job. Every buffer is now addressable. The Rockchip dma-heap
+  CMA, which sat in that RAM, is placed below 4 GiB. Verified only that the
+  kernel boots with the reduced memory map; no RGA job has been run, and the
+  hardware statements above predate this change.
 - Soft lockups and RCU stalls panic, and so reboot, leaving a ramoops
   record; hung tasks are only logged.
 - The board id, and so the hostname (`nerves-` plus the last four characters

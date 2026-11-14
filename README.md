@@ -1,7 +1,8 @@
 # Nerves System for the Home Assistant Green (Rockchip RK3566)
 
 A [Nerves](https://nerves-project.org) system for the Home Assistant Green:
-Rockchip RK3566 (4x Cortex-A55, Mali-G52, 0.8 TOPS NPU), 4 GiB RAM, eMMC,
+Rockchip RK3566 (4x Cortex-A55, Mali-G52, 0.8 TOPS NPU), 4 GiB RAM (about
+3.75 GiB usable, see [Hardware](#hardware)), eMMC,
 Gigabit Ethernet, USB, HDMI and a microSD slot. It is a base system for
 Vagus. The kernel is Rockchip's vendor 6.1 kernel (`armbian/linux-rockchip`
 `rk-6.1-rkr7.2`); U-Boot is v2026.04 with Home Assistant OS's Green patches.
@@ -272,7 +273,7 @@ path back to stock of its own.
 | NPU | Rockchip `rknpu` driver 0.9.8 | Probes with its IOMMU and `vdd_npu` at 900 mV; appears as a DRM node (`/dev/dri/card1`, `/dev/dri/renderD129`; there is no `/dev/rknpu`). Booting with no display attached gives the same numbering (display `card0`/`renderD128`, NPU `card1`/`renderD129`); only `/dev/fb0` is absent. No inference job has been run |
 | GPU | Mali-G52, `kbase` g29p1 | Probes as `/dev/mali0`. No userspace driver has been run |
 | Video codecs | Rockchip MPP (`/dev/mpp_service`) | RKVDEC, RKVENC, VDPU2, VEPU2, RKJPEGD and IEP2 register. No encode or decode has been run |
-| RGA 2D blitter | `/dev/rga`; not relied on: the RGA2 core addresses only the first 4 GiB of RAM, and a buffer above that fails the job | RGA2 (driver 1.3.13) probes; not exercised |
+| RGA 2D blitter | `/dev/rga`; the RGA2 core has no IOMMU and addresses only the first 4 GiB of RAM, so the system keeps all usable RAM below 4 GiB and any buffer is addressable | RGA2 (driver 1.3.13) probes; no job has been run |
 | DMA heaps | `/dev/dma_heap` | `system`, `system-uncached` and `reserved` present |
 | RTC | PCF8563 | Verified: `rtc0`, keeps time |
 | Watchdog | SoC watchdog via `nerves_heart` | Verified: arms the watchdog (44 s); a stopped feeder resets the board |
@@ -283,6 +284,11 @@ path back to stock of its own.
 
 Not exercised: audio playback, and the failed-first-power-up path of the
 power-domain patch.
+
+Memory: the device tree reserves all RAM above 4 GiB (256 MiB on a 4 GiB
+unit) as `no-map`, so about 3.75 GiB is usable. The RGA2 core has no IOMMU and
+reaches only the first 4 GiB; without the reservation, ordinary dma-bufs are
+allocated from that high RAM first.
 
 No onboard WiFi or Bluetooth (the vendor kernel config still includes USB Bluetooth support). No serial console is needed; the kernel console is on
 `tty0` and `ttyS2`.
