@@ -24,9 +24,10 @@ booted to userspace on a board.
 - Soft lockups and RCU stalls panic, and so reboot, leaving a ramoops
   record; hung tasks are only logged.
 - The board id, and so the hostname (`nerves-` plus the last four characters
-  of the serial), is the EEPROM serial that U-Boot puts in the device tree,
-  with the same serial from the U-Boot environment next and the SoC and MAC
-  fallbacks after. It was derived from the SoC ID because no U-Boot variable
+  of the serial), is a provisioned `nerves_serial_number` or `serial_number`
+  if set, else the EEPROM serial that U-Boot puts in the device tree, then
+  the same serial from the U-Boot environment, then the SoC and MAC
+  fallbacks. It was derived from the SoC ID because no U-Boot variable
   the config read exists.
 - The SD card-detect pin is muxed as a plain GPIO rather than the
   `sdmmc0_det` function, which made the GPIO request warn at every boot.
