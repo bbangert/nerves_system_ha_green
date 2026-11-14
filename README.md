@@ -165,7 +165,10 @@ Nothing is written to the eMMC's FAT this way.
    FIT at LBA 16384 and the whole layout.
 2. Put the card in the Green and power it on. The system is designed to boot
    from the card, with the hostname `nerves-` plus the last four characters
-   of the board serial (`rootfs_overlay/etc/erlinit.config`). SSH and mDNS
+   of the board serial (`rootfs_overlay/etc/erlinit.config`). A provisioned
+   `nerves_serial_number` or `serial_number` wins; otherwise the serial is the
+   EEPROM one from the device tree, then the same from the U-Boot environment
+   (`rootfs_overlay/etc/boardid.config`). SSH and mDNS
    come from the product firmware, not from this system.
 3. Installing replaces Home Assistant OS on the eMMC: the partition table,
    the system and all data. Back up first. Copy the same `.fw` to the unit

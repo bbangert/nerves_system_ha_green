@@ -23,6 +23,16 @@ booted to userspace on a board.
   rail at 1.8 V, a state that SPL is not built to boot from.
 - Soft lockups and RCU stalls panic, and so reboot, leaving a ramoops
   record; hung tasks are only logged.
+- The board id, and so the hostname (`nerves-` plus the last four characters
+  of the serial), is a provisioned `nerves_serial_number` or `serial_number`
+  if set, else the EEPROM serial that U-Boot puts in the device tree, then
+  the same serial from the U-Boot environment, then the SoC and MAC
+  fallbacks. It was derived from the SoC ID because no U-Boot variable
+  the config read exists.
+- The SD card-detect pin is muxed as a plain GPIO rather than the
+  `sdmmc0_det` function, which made the GPIO request warn at every boot.
+- The unused legacy Mali-4xx driver and the RK817 battery and charger
+  drivers (the Green has no battery) are no longer built.
 - U-Boot v2026.04 with Home Assistant OS's Green patches, built as a FIT
   (`u-boot.itb`) only. The board's stock first-stage loader loads it from
   LBA 16384 of the SD card, else the eMMC. A compiled-in boot script picks
