@@ -17,16 +17,17 @@ Verified on that unit:
   grows the data partition to the whole disk; the eMMC runs HS200.
 - A/B on SD and eMMC: upgrade, validate, and revert of an unvalidated slot.
   A zeroed state block boots slot A on defaults and writes nothing back (SD).
-- Restarts: `reboot`, kernel panic and watchdog reset on SD; `reboot` and
-  cold boot on eMMC (panic and watchdog reset were not repeated there).
+- Restarts: `reboot`, kernel panic, watchdog reset and cold boot, each
+  verified on SD and on eMMC; ten consecutive warm reboots all came back from
+  the eMMC.
 - Ethernet, both USB-A ports, RTC, hardware watchdog (`nerves_heart`), LEDs,
   CPU frequency scaling and thermal sensors, HDMI video with hot-unplug
   detection, and the board id from the EEPROM serial.
 - Driver probe only, nothing run on them: NPU, Mali GPU, MPP video codecs,
   RGA, HDMI audio, DMA heaps.
-- Not exercised: the power button, audio playback, a failed first power-up
-  of a power domain, and a card without our image in the slot (covered only
-  by the boot-script test matrix).
+- Not exercised: audio playback, a failed first power-up of a power domain,
+  and a card without our image in the slot (covered only by the boot-script
+  test matrix).
 
 - Vendor kernel 6.1 (`rk-6.1-rkr7.2`) with a device tree for the Green and
   drivers for the NPU, Mali GPU, MPP video codecs, RGA and the PCF8563 RTC.

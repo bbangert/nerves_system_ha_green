@@ -158,7 +158,7 @@ Read them by putting the card in a PC:
 | `uboot-fdt.dtb` | U-Boot's control device tree as the SPL handed it over; `dtc -I dtb -O dts uboot-fdt.dtb` shows every `/chosen` property |
 | `ramoops.bin` | The previous boot's kernel log from the ramoops RAM region, only if a kernel left its signature there (so only if RAM survived the reset); `strings ramoops.bin` |
 
-Nothing is written to the eMMC's FAT this way.
+Nothing is written to the eMMC's FAT this way. After a panic on an eMMC boot, the crashed boot's kernel log is in pstore: `mount -t pstore pstore <dir>` shows `dmesg-ramoops-0` and `console-ramoops-0`.
 
 ## Install
 
@@ -269,7 +269,7 @@ path back to stock of its own.
 | USB | USB 2.0 host | Both USB-A ports enumerate devices (a high-speed flash drive, a full-speed HID device); verified at that level only |
 | HDMI display | DRM/KMS | Display detected, a 3840x2160 mode set with a framebuffer console, hot-unplug detected |
 | HDMI audio | ALSA | The audio device registers; playback not tested |
-| NPU | Rockchip `rknpu` driver 0.9.8 | Probes with its IOMMU and `vdd_npu` at 900 mV; appears as a DRM node (`/dev/dri/card1`, `/dev/dri/renderD129`; there is no `/dev/rknpu`). No inference job has been run |
+| NPU | Rockchip `rknpu` driver 0.9.8 | Probes with its IOMMU and `vdd_npu` at 900 mV; appears as a DRM node (`/dev/dri/card1`, `/dev/dri/renderD129`; there is no `/dev/rknpu`). Booting with no display attached gives the same numbering (display `card0`/`renderD128`, NPU `card1`/`renderD129`); only `/dev/fb0` is absent. No inference job has been run |
 | GPU | Mali-G52, `kbase` g29p1 | Probes as `/dev/mali0`. No userspace driver has been run |
 | Video codecs | Rockchip MPP (`/dev/mpp_service`) | RKVDEC, RKVENC, VDPU2, VEPU2, RKJPEGD and IEP2 register. No encode or decode has been run |
 | RGA 2D blitter | `/dev/rga`; not relied on: the RGA2 core addresses only the first 4 GiB of RAM, and a buffer above that fails the job | RGA2 (driver 1.3.13) probes; not exercised |
@@ -277,11 +277,12 @@ path back to stock of its own.
 | RTC | PCF8563 | Verified: `rtc0`, keeps time |
 | Watchdog | SoC watchdog via `nerves_heart` | Verified: arms the watchdog (44 s); a stopped feeder resets the board |
 | LEDs | Power, user, activity | Verified: power on, user LED heartbeat, activity LED on eMMC I/O |
+| Button | RK809 power key (`rk809 pwrkey` input) | Verified: a short press delivers `KEY_POWER`; nothing acts on it by default. Long press not tried |
 | CPU frequency | 408-1800 MHz | Verified: all steps; under a 2-minute 4-core load 1.8 GHz held at 1.05 V core, SoC about 45 C; thermal sensors read |
-| eMMC | HS200 | Verified; the data partition grows to the whole disk on first boot (27.2 GiB usable on the 32 GB unit) |
+| eMMC | HS200 | Verified; the data partition grows to the whole disk on first boot (27.2 GiB usable on the 32 GB unit); about 144 MB/s raw read, 79 MB/s synced write (one unit, 256 MiB samples) |
 
-Not exercised: the power button, audio playback, and the failed-first-power-up
-path of the power-domain patch.
+Not exercised: audio playback, and the failed-first-power-up path of the
+power-domain patch.
 
 No onboard WiFi or Bluetooth (the vendor kernel config still includes USB Bluetooth support). No serial console is needed; the kernel console is on
 `tty0` and `ttyS2`.
