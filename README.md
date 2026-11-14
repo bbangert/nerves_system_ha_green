@@ -43,6 +43,17 @@ project's workflow, so a damaged loader could not be repaired.
    import; otherwise, or if the import fails part-way, it boots as if there
    were no block: slot A on defaults, nothing saved.
 
+A restart (`reboot`, a panic, the watchdog) resets the SoC but not the RK809
+PMIC, and the stock SPL neither programs the PMIC nor switches to 1.8 V
+signalling, so the SD card has to come out of any reset as that SPL expects
+it. The card therefore runs at 3.3 V high speed (50 MHz, at most 25 MB/s on
+the bus), not UHS-I SDR104 (148.5 MHz here, at most 74 MB/s), and its supply
+(`vcc3v3_sd`) and I/O rail (`vccio_sd`, fixed at 3.3 V) are always on. Seen
+on a board with an earlier build: after `reboot` from SDR104, with both
+rails switched off by the card's shutdown, the unit booted the eMMC. The
+eMMC needs none of this: its supply and its 1.8 V I/O rail are always on,
+and CMD0 returns it from HS200 to its default timing.
+
 The boot script, the config delta against Home Assistant OS's U-Boot and the
 FIT contract are in [uboot/README.md](uboot/README.md).
 

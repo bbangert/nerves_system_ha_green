@@ -15,6 +15,12 @@ booted to userspace on a board.
   probed with the rail still off. A power domain that fails its first
   power-up now fails the attaching device's probe instead of panicking the
   kernel.
+- The SD card runs at 3.3 V high speed instead of UHS-I SDR104, with its
+  supply and I/O rail always on. A `reboot` from SDR104 brought the unit up
+  in stock Home Assistant OS: the card's shutdown had switched both rails
+  off, the restart does not reset the PMIC, and the stock SPL skipped the
+  card. A panic or watchdog reset would have left the card and its I/O
+  rail at 1.8 V, a state that SPL is not built to boot from.
 - Soft lockups and RCU stalls panic, and so reboot, leaving a ramoops
   record; hung tasks are only logged.
 - U-Boot v2026.04 with Home Assistant OS's Green patches, built as a FIT
