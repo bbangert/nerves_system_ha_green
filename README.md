@@ -106,7 +106,7 @@ only the GUIDs differ.
 | 34816 | p2 boot FAT, 256 MiB: `Image.a`, `Image.b`, `rk3566-ha-green.a.dtb`, `rk3566-ha-green.b.dtb`, and an empty `medium.sd` or `medium.mmc` |
 | 559104 | p3 rootfs A, squashfs, 512 MiB |
 | 1607680 | p4 rootfs B, squashfs, 512 MiB |
-| 2656256 | p5 application data, ext4, sized to the end of the disk on eMMC (512 MiB on SD until `expand-data`) |
+| 2656256 | p5 application data, ext4, to the end of the disk (eMMC install, or a card burned directly); 512 MiB on a card written from an image file until `expand-data` |
 
 The root device is chosen by name in the boot script, never by GUID or label.
 U-Boot and Linux number the MMC devices alike: `mmcblk0` is the eMMC and
