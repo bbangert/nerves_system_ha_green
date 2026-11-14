@@ -13,8 +13,9 @@ Verified on that unit:
   image on both, the card boots (rescue path).
 - `green-install-emmc`: the loader area (LBA 64-16383) hash is identical
   before and after and equal to the factory value, the FIT window equals the
-  source's, and fwup leaves the tool's GPT unchanged. The first eMMC boot
-  grows the data partition to the whole disk; the eMMC runs HS200.
+  source's, and fwup leaves the tool's GPT unchanged. The installer
+  sizes the data partition to the whole disk; the first eMMC boot formats it,
+  and the eMMC runs HS200.
 - A/B on SD and eMMC: upgrade, validate, and revert of an unvalidated slot.
   A zeroed state block boots slot A on defaults and writes nothing back (SD).
 - Restarts: `reboot`, kernel panic, watchdog reset and cold boot, each

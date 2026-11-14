@@ -106,7 +106,7 @@ only the GUIDs differ.
 | 34816 | p2 boot FAT, 256 MiB: `Image.a`, `Image.b`, `rk3566-ha-green.a.dtb`, `rk3566-ha-green.b.dtb`, and an empty `medium.sd` or `medium.mmc` |
 | 559104 | p3 rootfs A, squashfs, 512 MiB |
 | 1607680 | p4 rootfs B, squashfs, 512 MiB |
-| 2656256 | p5 application data, ext4, grows to the end of the disk |
+| 2656256 | p5 application data, ext4, sized to the end of the disk on eMMC (512 MiB on SD until `expand-data`) |
 
 The root device is chosen by name in the boot script, never by GUID or label.
 U-Boot and Linux number the MMC devices alike: `mmcblk0` is the eMMC and
@@ -279,7 +279,7 @@ path back to stock of its own.
 | LEDs | Power, user, activity | Verified: power on, user LED heartbeat, activity LED on eMMC I/O |
 | Button | RK809 power key (`rk809 pwrkey` input) | Verified: a short press delivers `KEY_POWER`; nothing acts on it by default. Long press not tried |
 | CPU frequency | 408-1800 MHz | Verified: all steps; under a 2-minute 4-core load 1.8 GHz held at 1.05 V core, SoC about 45 C; thermal sensors read |
-| eMMC | HS200 | Verified; the data partition grows to the whole disk on first boot (27.2 GiB usable on the 32 GB unit); about 144 MB/s raw read, 79 MB/s synced write (one unit, 256 MiB samples) |
+| eMMC | HS200 | Verified; the installer sizes the data partition to the whole disk and the first boot formats it (27.2 GiB usable on the 32 GB unit); about 144 MB/s raw read, 79 MB/s synced write (one unit, 256 MiB samples) |
 
 Not exercised: audio playback, and the failed-first-power-up path of the
 power-domain patch.
