@@ -293,6 +293,9 @@ OS's Green patches, unmodified ([uboot/patches/README.md](uboot/patches/README.m
 The kernel patch `linux/0001-arm64-dts-rockchip-add-ha-green.patch` adds
 `rk3566-ha-green.dts` (`GPL-2.0+ OR MIT`, Copyright Seeed Co., Ltd.), ported
 from the Green device tree in Home Assistant OS 18.4.
+`linux/0002-soc-rockchip-pm-domains-fail-power-up-without-panic.patch`
+makes a power domain that fails to power up fail its consumer's probe
+instead of panicking the kernel.
 The DDR and BL31 blobs are Rockchip's rkbin
 ([uboot/rkbin/README.md](uboot/rkbin/README.md)). The build scaffolding and
 fwup configuration derive from `nerves_system_rock_4d`.
