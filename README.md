@@ -6,9 +6,10 @@ Gigabit Ethernet, USB, HDMI and a microSD slot. It is a base system for
 Vagus. The kernel is Rockchip's vendor 6.1 kernel (`armbian/linux-rockchip`
 `rk-6.1-rkr7.2`); U-Boot is v2026.04 with Home Assistant OS's Green patches.
 
-**Status: nothing here has been run on a board yet.** This describes what the
-build is designed to do and what its guards enforce; statements about the
-hardware are marked as such.
+**Status: run on one Home Assistant Green (4 GiB RAM, 32 GB eMMC), from an SD
+card and installed to the eMMC.** The [Hardware](#hardware) table says what
+was verified and what was only probed or not exercised; statements about
+other units or untested paths are marked as such.
 
 The design rule behind everything else: the Green's own first-stage loader
 stays exactly as it is, and nothing this system builds, installs or upgrades
@@ -19,18 +20,20 @@ project's workflow, so a damaged loader could not be repaired.
 
 1. The RK3566 BootROM starts the board's stock first stage, which this
    system never writes. Read out of one unit running stock Home Assistant OS
-   18.4 (read out, not boot-tested with this system): the SPI NOR holds a
-   loader with `U-Boot SPL 2023.07.02`, the eMMC holds `U-Boot SPL 2026.04`
-   (LBA 64-16383), and the device trees of both SPLs carry the boot order SD
-   card, eMMC, SPI NOR (`u-boot,spl-boot-order`). Which of the two SPLs the
-   BootROM runs is inferred, not proven: the running system had no
-   `u-boot,spl-boot-device` in `/chosen`, which a 2026.04 SPL would set, so
-   the NOR's SPL probably ran.
-2. Either SPL is designed to load `u-boot.itb` (our U-Boot and BL31, a FIT)
-   from raw LBA 16384 of the SD card if the card carries FDT magic there,
-   otherwise of the eMMC, so a prepared SD card is designed to take over the
-   boot, and pulling it is designed to return the unit to what the eMMC
-   holds. Nothing here has been booted on hardware yet.
+   18.4: the SPI NOR holds a loader with `U-Boot SPL 2023.07.02`, the eMMC
+   holds `U-Boot SPL 2026.04` (LBA 64-16383), and the device trees of both
+   SPLs carry the boot order SD card, eMMC, SPI NOR
+   (`u-boot,spl-boot-order`). Which of the two SPLs the BootROM runs is
+   inferred, not proven: the running system had no `u-boot,spl-boot-device`
+   in `/chosen`, which a 2026.04 SPL would set, so the NOR's SPL probably
+   ran.
+2. Either SPL loads `u-boot.itb` (our U-Boot and BL31, a FIT) from raw LBA
+   16384 of the SD card if the card carries FDT magic there, otherwise of
+   the eMMC. On the test unit a prepared SD card took over the boot, the
+   eMMC booted without it, and with our image on the eMMC and the card
+   inserted the card booted (the rescue path). A card without our image in
+   the slot was not tried on hardware; only the boot-script test matrix
+   covers it.
    Our U-Boot boots from the disk a 2026.04 SPL says it loaded U-Boot from
    (`u-boot,spl-boot-device`); the older SPL gives no such hint, so there it
    repeats the FDT-magic probe, and a card with FDT magic at LBA 16384 whose
@@ -103,7 +106,7 @@ only the GUIDs differ.
 | 34816 | p2 boot FAT, 256 MiB: `Image.a`, `Image.b`, `rk3566-ha-green.a.dtb`, `rk3566-ha-green.b.dtb`, and an empty `medium.sd` or `medium.mmc` |
 | 559104 | p3 rootfs A, squashfs, 512 MiB |
 | 1607680 | p4 rootfs B, squashfs, 512 MiB |
-| 2656256 | p5 application data, ext4, grows to the end of the disk |
+| 2656256 | p5 application data, ext4, to the end of the disk (eMMC install, or a card burned directly); 512 MiB on a card written from an image file until `expand-data` |
 
 The root device is chosen by name in the boot script, never by GUID or label.
 U-Boot and Linux number the MMC devices alike: `mmcblk0` is the eMMC and
@@ -155,7 +158,7 @@ Read them by putting the card in a PC:
 | `uboot-fdt.dtb` | U-Boot's control device tree as the SPL handed it over; `dtc -I dtb -O dts uboot-fdt.dtb` shows every `/chosen` property |
 | `ramoops.bin` | The previous boot's kernel log from the ramoops RAM region, only if a kernel left its signature there (so only if RAM survived the reset); `strings ramoops.bin` |
 
-Nothing is written to the eMMC's FAT this way.
+Nothing is written to the eMMC's FAT this way. After a panic on an eMMC boot, the crashed boot's kernel log is in pstore: `mount -t pstore pstore <dir>` shows `dmesg-ramoops-0` and `console-ramoops-0`.
 
 ## Install
 
@@ -163,7 +166,7 @@ Nothing is written to the eMMC's FAT this way.
    `complete` task, for example `mix burn` or
    `fwup -a -d /dev/sdX -t complete -i product.fw`. The card then carries the
    FIT at LBA 16384 and the whole layout.
-2. Put the card in the Green and power it on. The system is designed to boot
+2. Put the card in the Green and power it on. The system boots
    from the card, with the hostname `nerves-` plus the last four characters
    of the board serial (`rootfs_overlay/etc/erlinit.config`). A provisioned
    `nerves_serial_number` or `serial_number` wins; otherwise the serial is the
@@ -218,8 +221,8 @@ Nothing is written to the eMMC's FAT this way.
    `FAIL: do not reboot into the eMMC; no repair was attempted`.
    After an interruption the tool can simply be run again; the SD card stays
    bootable throughout.
-4. Remove the card and reboot. Without the card the stock SPL is designed to
-   fall through to the eMMC's copy of our FIT.
+4. Remove the card and reboot. Without the card the stock SPL falls
+   through to the eMMC's copy of our FIT.
 
 U-Boot is not part of an over-the-air upgrade: upgrades write only p2-p4 and
 the state block. A new U-Boot arrives only through `complete` or `install`.
@@ -260,16 +263,26 @@ path back to stock of its own.
 
 ## Hardware
 
-| Feature | Intended support | Status |
+| Feature | Support | Status |
 | --- | --- | --- |
-| Ethernet (GbE) | `stmmac` driver | planned, not yet verified on hardware |
-| USB | USB 2.0 host | planned, not yet verified on hardware |
-| HDMI display and audio | DRM/KMS, ALSA | planned, not yet verified on hardware |
-| NPU | Rockchip `rknpu` driver 0.9.8 | planned, not yet verified on hardware |
-| GPU | Mali-G52, `kbase` g29p1 | planned, not yet verified on hardware |
-| Video codecs | Rockchip MPP (`/dev/mpp_service`) | planned, not yet verified on hardware |
-| RGA 2D blitter | `/dev/rga`; driver enabled; not relied on: the RGA2 core addresses only the first 4 GiB of RAM, and a buffer above that fails the job | planned, not yet verified on hardware |
-| RTC | PCF8563 | planned, not yet verified on hardware |
+| Ethernet (GbE) | `stmmac` driver | Verified: 1 Gb/s link, DHCP, MAC from the board EEPROM |
+| USB | USB 2.0 host | Both USB-A ports enumerate devices (a high-speed flash drive, a full-speed HID device); verified at that level only |
+| HDMI display | DRM/KMS | Display detected, a 3840x2160 mode set with a framebuffer console, hot-unplug detected |
+| HDMI audio | ALSA | The audio device registers; playback not tested |
+| NPU | Rockchip `rknpu` driver 0.9.8 | Probes with its IOMMU and `vdd_npu` at 900 mV; appears as a DRM node (`/dev/dri/card1`, `/dev/dri/renderD129`; there is no `/dev/rknpu`). Booting with no display attached gives the same numbering (display `card0`/`renderD128`, NPU `card1`/`renderD129`); only `/dev/fb0` is absent. No inference job has been run |
+| GPU | Mali-G52, `kbase` g29p1 | Probes as `/dev/mali0`. No userspace driver has been run |
+| Video codecs | Rockchip MPP (`/dev/mpp_service`) | RKVDEC, RKVENC, VDPU2, VEPU2, RKJPEGD and IEP2 register. No encode or decode has been run |
+| RGA 2D blitter | `/dev/rga`; not relied on: the RGA2 core addresses only the first 4 GiB of RAM, and a buffer above that fails the job | RGA2 (driver 1.3.13) probes; not exercised |
+| DMA heaps | `/dev/dma_heap` | `system`, `system-uncached` and `reserved` present |
+| RTC | PCF8563 | Verified: `rtc0`, keeps time |
+| Watchdog | SoC watchdog via `nerves_heart` | Verified: arms the watchdog (44 s); a stopped feeder resets the board |
+| LEDs | Power, user, activity | Verified: power on, user LED heartbeat, activity LED on eMMC I/O |
+| Button | RK809 power key (`rk809 pwrkey` input) | Verified: a short press delivers `KEY_POWER`; nothing acts on it by default. Long press not tried |
+| CPU frequency | 408-1800 MHz | Verified: all steps; under a 2-minute 4-core load 1.8 GHz held at 1.05 V core, SoC about 45 C; thermal sensors read |
+| eMMC | HS200 | Verified; the installer sizes the data partition to the whole disk and the first boot formats it (27.2 GiB usable on the 32 GB unit); about 144 MB/s raw read, 79 MB/s synced write (one unit, 256 MiB samples) |
+
+Not exercised: audio playback, and the failed-first-power-up path of the
+power-domain patch.
 
 No onboard WiFi or Bluetooth (the vendor kernel config still includes USB Bluetooth support). No serial console is needed; the kernel console is on
 `tty0` and `ttyS2`.
