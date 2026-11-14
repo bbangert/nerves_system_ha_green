@@ -12,8 +12,11 @@ booted to userspace on a board.
   the stock loader.
 - The NPU's power domain is powered only after the RK809 has raised
   `vdd_npu` to 900 mV; the first SD boot panicked when the NPU's IOMMU
-  probed with the rail still off. A power domain that fails to power up now
-  fails its consumer's probe instead of panicking the kernel.
+  probed with the rail still off. A power domain that fails its first
+  power-up now fails the attaching device's probe instead of panicking the
+  kernel.
+- Soft lockups and RCU stalls panic, and so reboot, leaving a ramoops
+  record; hung tasks are only logged.
 - U-Boot v2026.04 with Home Assistant OS's Green patches, built as a FIT
   (`u-boot.itb`) only. The board's stock first-stage loader loads it from
   LBA 16384 of the SD card, else the eMMC. A compiled-in boot script picks
