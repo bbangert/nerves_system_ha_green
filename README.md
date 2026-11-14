@@ -1,11 +1,12 @@
 # Nerves System for the Home Assistant Green (Rockchip RK3566)
 
 A [Nerves](https://nerves-project.org) system for the Home Assistant Green:
-Rockchip RK3566 (4x Cortex-A55, Mali-G52, 0.8 TOPS NPU), 4 GiB RAM (about
-3.75 GiB usable, see [Hardware](#hardware)), eMMC,
-Gigabit Ethernet, USB, HDMI and a microSD slot. It is a base system for
-Vagus. The kernel is Rockchip's vendor 6.1 kernel (`armbian/linux-rockchip`
-`rk-6.1-rkr7.2`); U-Boot is v2026.04 with Home Assistant OS's Green patches.
+Rockchip RK3566 (4x Cortex-A55, Mali-G52, 0.8 TOPS NPU), 4 GiB RAM (the
+kernel uses the 3.75 GiB below 4 GiB, MemTotal about 3.58 GiB; see
+[Hardware](#hardware)), eMMC, Gigabit Ethernet, USB, HDMI and a microSD slot.
+It is a base system for Vagus. The kernel is Rockchip's vendor 6.1 kernel
+(`armbian/linux-rockchip` `rk-6.1-rkr7.2`); U-Boot is v2026.04 with Home
+Assistant OS's Green patches.
 
 **Status: run on one Home Assistant Green (4 GiB RAM, 32 GB eMMC), from an SD
 card and installed to the eMMC.** The [Hardware](#hardware) table says what
@@ -286,9 +287,14 @@ Not exercised: audio playback, and the failed-first-power-up path of the
 power-domain patch.
 
 Memory: the device tree reserves all RAM above 4 GiB (256 MiB on a 4 GiB
-unit) as `no-map`, so about 3.75 GiB is usable. The RGA2 core has no IOMMU and
-reaches only the first 4 GiB; without the reservation, ordinary dma-bufs are
-allocated from that high RAM first.
+unit) as `no-map`. On the unit, `/proc/iomem` lists System RAM as
+`00200000-efffffff` only, with `1f0000000-1ffffffff` reserved. The kernel uses
+the 3.75 GiB below 4 GiB; `MemTotal` is about 3.58 GiB (3751128 kB, was
+4012756 kB) because of the kernel's own reservations. Both CMA pools are below
+4 GiB: the default 128 MiB pool and the 32 MiB Rockchip dma-heap pool, which
+used to sit above it. The RGA2 core has no IOMMU and reaches only the first
+4 GiB; without the reservation, ordinary dma-bufs are allocated from that high
+RAM first. No RGA job has been run, so RGA scaling itself is unproven.
 
 No onboard WiFi or Bluetooth (the vendor kernel config still includes USB Bluetooth support). No serial console is needed; the kernel console is on
 `tty0` and `ttyS2`.
