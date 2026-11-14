@@ -23,6 +23,11 @@ booted to userspace on a board.
   rail at 1.8 V, a state that SPL is not built to boot from.
 - Soft lockups and RCU stalls panic, and so reboot, leaving a ramoops
   record; hung tasks are only logged.
+- The board id, and so the hostname (`nerves-` plus the last four characters
+  of the serial), is the EEPROM serial that U-Boot puts in the device tree,
+  with the same serial from the U-Boot environment next and the SoC and MAC
+  fallbacks after. It was derived from the SoC ID because no U-Boot variable
+  the config read exists.
 - U-Boot v2026.04 with Home Assistant OS's Green patches, built as a FIT
   (`u-boot.itb`) only. The board's stock first-stage loader loads it from
   LBA 16384 of the SD card, else the eMMC. A compiled-in boot script picks
