@@ -1,9 +1,32 @@
 # Changelog
 
-## 0.1.0-dev
+## 0.1.0
 
-Unreleased. Initial system for the Home Assistant Green (RK3566); not yet
-booted to userspace on a board.
+Initial system for the Home Assistant Green (RK3566). Run on one Home
+Assistant Green (4 GiB RAM, 32 GB eMMC), from an SD card and installed to the
+eMMC.
+
+Verified on that unit:
+
+- Boot chain: the unchanged factory first-stage loader takes `u-boot.itb`
+  from the SD card when it carries our image, else from the eMMC; with our
+  image on both, the card boots (rescue path).
+- `green-install-emmc`: the loader area (LBA 64-16383) hash is identical
+  before and after and equal to the factory value, the FIT window equals the
+  source's, and fwup leaves the tool's GPT unchanged. The first eMMC boot
+  grows the data partition to the whole disk; the eMMC runs HS200.
+- A/B on SD and eMMC: upgrade, validate, and revert of an unvalidated slot.
+  A zeroed state block boots slot A on defaults and writes nothing back (SD).
+- Restarts: `reboot`, kernel panic and watchdog reset on SD; `reboot` and
+  cold boot on eMMC (panic and watchdog reset were not repeated there).
+- Ethernet, both USB-A ports, RTC, hardware watchdog (`nerves_heart`), LEDs,
+  CPU frequency scaling and thermal sensors, HDMI video with hot-unplug
+  detection, and the board id from the EEPROM serial.
+- Driver probe only, nothing run on them: NPU, Mali GPU, MPP video codecs,
+  RGA, HDMI audio, DMA heaps.
+- Not exercised: the power button, audio playback, a failed first power-up
+  of a power domain, and a card without our image in the slot (covered only
+  by the boot-script test matrix).
 
 - Vendor kernel 6.1 (`rk-6.1-rkr7.2`) with a device tree for the Green and
   drivers for the NPU, Mali GPU, MPP video codecs, RGA and the PCF8563 RTC.
