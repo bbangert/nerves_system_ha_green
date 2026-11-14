@@ -1,7 +1,7 @@
-From 86ff7730d4354af3ed1d52da6965914d545542ff Mon Sep 17 00:00:00 2001
+From 6844adcb851d1b3cbaf7e84e7555e30112b12a5f Mon Sep 17 00:00:00 2001
 From: Ben Bangert <100193+bbangert@users.noreply.github.com>
 Date: Fri, 13 Nov 2026 05:03:50 +0000
-Subject: [PATCH] arm64: dts: rockchip: add Home Assistant Green
+Subject: [PATCH 1/2] arm64: dts: rockchip: add Home Assistant Green
 
 Port of the Home Assistant Green (RK3566) board DTS to the Rockchip
 vendor 6.1 kernel. Source: home-assistant/operating-system 18.4 (4a7dab478abc),
@@ -29,15 +29,22 @@ Additions:
   of that include (FIQ debugger, PARTUUID bootargs).
 - rtc0 pinned to the battery-backed PCF8563.
 - vdd_npu always-on, as on the vendor RK356x boards this NPU driver is
-  used with; HAOS never powered the NPU.
+  used with; HAOS never powered the NPU. Mainline U-Boot leaves it off at
+  500 mV and this kernel ignores regulator-init-microvolt, so its minimum
+  is 900 mV (vendor U-Boot's boot value), which the regulator core applies
+  before enabling it.
+- rknpu_mmu carries a vdd-supply that its driver never reads, so fw_devlink
+  defers its probe until the RK809 has switched vdd_npu on. rk_iommu
+  registers before the I2C and PMIC drivers, and attaching it powers up
+  PD_NPU, whose bus never leaves idle on an unpowered rail.
 - Activity LED on mmc0 host activity instead of CPU activity.
 
 The SPI NOR controller (sfc) is deliberately left disabled: the NOR holds
 the factory boot loader and Linux must not expose it.
 ---
  arch/arm64/boot/dts/rockchip/Makefile         |   1 +
- .../boot/dts/rockchip/rk3566-ha-green.dts     | 770 ++++++++++++++++++
- 2 files changed, 771 insertions(+)
+ .../boot/dts/rockchip/rk3566-ha-green.dts     | 781 ++++++++++++++++++
+ 2 files changed, 782 insertions(+)
  create mode 100644 arch/arm64/boot/dts/rockchip/rk3566-ha-green.dts
 
 diff --git a/arch/arm64/boot/dts/rockchip/Makefile b/arch/arm64/boot/dts/rockchip/Makefile
@@ -54,10 +61,10 @@ index 997c4ab..5f72135 100644
  dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-nanopi-r3-rev01.dtb
 diff --git a/arch/arm64/boot/dts/rockchip/rk3566-ha-green.dts b/arch/arm64/boot/dts/rockchip/rk3566-ha-green.dts
 new file mode 100644
-index 0000000..e65c48a
+index 0000000..5c94f10
 --- /dev/null
 +++ b/arch/arm64/boot/dts/rockchip/rk3566-ha-green.dts
-@@ -0,0 +1,770 @@
+@@ -0,0 +1,781 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * Copyright (c) 2023 Seeed Co., Ltd.
@@ -362,14 +369,18 @@ index 0000000..e65c48a
 +			/*
 +			 * Kept on as on every vendor RK356x board: HAOS never
 +			 * powered the NPU, so switching this rail is untested.
++			 * The boot loader leaves it off at 500 mV and this
++			 * kernel ignores regulator-init-microvolt, so the
++			 * minimum is what raises it before it is enabled:
++			 * 900 mV is vendor U-Boot's boot value and below
++			 * every NPU OPP's maximum.
 +			 */
 +			vdd_npu: DCDC_REG4 {
 +				regulator-name = "vdd_npu";
 +				regulator-always-on;
 +				regulator-boot-on;
-+				regulator-init-microvolt = <900000>;
 +				regulator-initial-mode = <0x2>;
-+				regulator-min-microvolt = <500000>;
++				regulator-min-microvolt = <900000>;
 +				regulator-max-microvolt = <1350000>;
 +				regulator-ramp-delay = <6001>;
 +
@@ -650,8 +661,15 @@ index 0000000..e65c48a
 +	status = "okay";
 +};
 +
-+/* Without the IOMMU the NPU is limited to DMA32 buffers on a 4 GiB board. */
++/*
++ * Without the IOMMU the NPU is limited to DMA32 buffers on a 4 GiB board.
++ * rk_iommu probes before the I2C and RK809 drivers register, and attaching
++ * powers up PD_NPU, which never leaves idle while vdd_npu is off. The driver
++ * reads no supply: the property only makes fw_devlink defer the probe until
++ * the RK809 has bound and switched the rail on.
++ */
 +&rknpu_mmu {
++	vdd-supply = <&vdd_npu>;
 +	status = "okay";
 +};
 +

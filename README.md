@@ -234,7 +234,8 @@ resets the board, so enable it only after Linux has been seen to take it over
 every boot. It is off because U-Boot's driver cannot probe on RK3568 (the
 script writes the registers directly) and because of that one-way behaviour.
 While it is off, a hard kernel hang needs a power cycle and the ramoops log is
-probably lost; panics still reboot after 10 s.
+probably lost; panics still reboot after 10 s, and the kernel panics on a soft
+lockup or an RCU stall (a hung task is only logged).
 
 ## Restore to stock Home Assistant OS
 
@@ -293,6 +294,9 @@ OS's Green patches, unmodified ([uboot/patches/README.md](uboot/patches/README.m
 The kernel patch `linux/0001-arm64-dts-rockchip-add-ha-green.patch` adds
 `rk3566-ha-green.dts` (`GPL-2.0+ OR MIT`, Copyright Seeed Co., Ltd.), ported
 from the Green device tree in Home Assistant OS 18.4.
+`linux/0002-soc-rockchip-pm-domains-fail-power-up-without-panic.patch`
+makes a power domain that fails its first power-up fail the attaching
+device's probe instead of panicking the kernel.
 The DDR and BL31 blobs are Rockchip's rkbin
 ([uboot/rkbin/README.md](uboot/rkbin/README.md)). The build scaffolding and
 fwup configuration derive from `nerves_system_rock_4d`.
