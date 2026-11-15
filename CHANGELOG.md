@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Documentation only: the NPU, Mali GPU, MPP codecs and RGA2 are recorded as
+  verified from an app container (`rockchip_probe`), replacing "probe only".
+  The RGA2 driver refuses buffers passed as ordinary user memory and accepts
+  dma-bufs; the SoC's device tree must be visible to userspace for MPP and
+  the RKNN runtime to initialise.
+
 ## 0.1.0
 
 Initial system for the Home Assistant Green (RK3566). Run on one Home
