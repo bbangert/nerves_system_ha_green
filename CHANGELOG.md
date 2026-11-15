@@ -6,8 +6,8 @@
   verified from an app container (`rockchip_probe`), replacing "probe only".
   The RGA2 driver refused the tested user-memory buffers (it requires user
   memory to map as a single contiguous segment, which ordinary page-backed
-  allocations do not) and accepted dma-bufs; the SoC's device tree must be visible to userspace for MPP and
-  the RKNN runtime to initialise.
+  allocations do not) and accepted dma-bufs. The SoC's device tree must be
+  visible to userspace for MPP and the RKNN runtime to initialise.
 
 ## 0.1.0
 
