@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1
 
 - The kernel's default cpufreq governor is `performance` and the RK809's own
   RTC driver is not built, matching the settings Home Assistant OS defines for
