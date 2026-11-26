@@ -276,11 +276,11 @@ path back to stock of its own.
 | Video codecs | Rockchip MPP (`/dev/mpp_service`) | RKVDEC, RKVENC, VDPU2, VEPU2, RKJPEGD and IEP2 register. Verified from an app container with MPP 1.1.0: hardware H.264 and H.265 decode and H.264 encode of 720p clips. Needs `/proc/device-tree/compatible`; MPP registers no codec without it |
 | RGA 2D blitter | `/dev/rga`; the RGA2 core has no IOMMU and addresses only the first 4 GiB of RAM, so the system keeps all usable RAM below 4 GiB and any buffer is addressable | RGA2 (driver 1.3.13). Verified from an app container with librga 1.10.5: copy, resize, NV12 to RGB conversion, crop, rotate, flip and fill match a CPU reference with dma-buf buffers from all four heaps; the kernel driver refused the tested user-memory buffers: it requires user memory to map as a single contiguous segment, which ordinary page-backed allocations do not |
 | DMA heaps | `/dev/dma_heap` | `system`, `system-uncached` and `reserved` present |
-| RTC | PCF8563 | Verified: `rtc0`, keeps time |
+| RTC | PCF8563 | Verified: `rtc0`, keeps time. The RK809's own RTC has no backup cell and is not built |
 | Watchdog | SoC watchdog via `nerves_heart` | Verified: arms the watchdog (44 s); a stopped feeder resets the board |
 | LEDs | Power, user, activity | Verified: power on, user LED heartbeat, activity LED on eMMC I/O |
 | Button | RK809 power key (`rk809 pwrkey` input) | Verified: a short press delivers `KEY_POWER`; nothing acts on it by default. Long press not tried |
-| CPU frequency | 408-1800 MHz | Verified: all steps; under a 2-minute 4-core load 1.8 GHz held at 1.05 V core, SoC about 45 C; thermal sensors read |
+| CPU frequency | 408-1800 MHz, default governor `performance` (as in Home Assistant OS) | Verified with the earlier `schedutil` default: all steps; under a 2-minute 4-core load 1.8 GHz held at 1.05 V core, SoC about 45 C; thermal sensors read. The `performance` default is not yet measured on a board |
 | eMMC | HS200 | Verified; the installer sizes the data partition to the whole disk and the first boot formats it (27.2 GiB usable on the 32 GB unit); about 144 MB/s raw read, 79 MB/s synced write (one unit, 256 MiB samples) |
 
 Not exercised: audio playback, and the failed-first-power-up path of the
@@ -307,7 +307,7 @@ accelerator results above were measured with the
 [`rockchip_probe`](https://github.com/bbangert/ha-bench-addons/tree/main/rockchip_probe)
 bench app at 720p and 1080p test sizes, which also documents the method. Not
 measured: the probe app on a boot with no display attached (HDMI was unplugged
-while running), sustained or thermal behaviour (runs were under a minute, at about 30 C), and
+while running), sustained or thermal behaviour (runs were under a minute, at about 30 C, with the `schedutil` governor, so idle temperature under `performance` is unmeasured), and
 the accuracy of quantized detection models.
 
 ## Building
