@@ -5,10 +5,12 @@
 - The kernel's default cpufreq governor is `performance` and the RK809's own
   RTC driver is not built, matching the settings Home Assistant OS defines for
   this board. The CPU now holds its top frequency instead of following
-  `schedutil`, which raises idle power and temperature; the governor can still
-  be changed at runtime through sysfs. The PCF8563 is the only RTC (`rtc0`),
-  so the unused `rtc1` alias is gone from the device tree. Not yet run on a
-  board.
+  `schedutil`; the other governors remain selectable through sysfs. The
+  PCF8563 is the only RTC (`rtc0`), so the unused `rtc1` alias is gone from the
+  device tree. Run on one Home Assistant Green: the CPU stays at 1800 MHz, idle
+  SoC temperature is unchanged within the sensor's 0.6 C step (about 33 C), and
+  10 minutes of 4-core load held 44.4 C without throttling. Idle power was not
+  measured.
 - Documentation only: the NPU, Mali GPU, MPP codecs and RGA2 are recorded as
   verified from an app container (`rockchip_probe`), replacing "probe only".
   The RGA2 driver refused the tested user-memory buffers (it requires user
